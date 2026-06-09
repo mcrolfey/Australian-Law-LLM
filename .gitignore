@@ -1,0 +1,29 @@
+# Model outputs
+lora_australian_law_model/
+unsloth_australian_legal_lora/
+unsloth_compiled_cache/
+merged_model/
+*.safetensors
+*.bin
+*.gguf
+
+# Dataset cache
+~/.cache/huggingface/
+*.jsonl
+*.arrow
+*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Kaggle
+~/.kaggle/
+
+# Misc
+.DS_Store
+*.log

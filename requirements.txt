@@ -1,0 +1,18 @@
+# Core fine-tuning stack
+unsloth[colab-new]>=2024.9
+trl>=0.11.0
+transformers>=4.45.0
+peft>=0.13.0
+accelerate>=0.34.0
+bitsandbytes>=0.44.0
+
+# Dataset & hub
+datasets>=3.0.0
+huggingface-hub>=0.24.0
+kagglehub>=0.3.0
+
+# Web UI
+gradio>=5.0.0
+
+# Utilities
+torch>=2.4.0
