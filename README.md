@@ -34,7 +34,7 @@ The corpus covers legislation, case law, and legal instruments across all Austra
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Australian-Law-LLM.git
+git clone https://github.com/mcrolfey/Australian-Law-LLM.git
 cd Australian-Law-LLM
 ```
 
