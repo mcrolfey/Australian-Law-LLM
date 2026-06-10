@@ -16,17 +16,23 @@ import argparse
 import importlib
 import torch
 
-# Pre-warm triton and torch._inductor before unsloth is imported.
-# On Windows, unsloth crashes silently if these are not already cached
-# in sys.modules when it loads. This is a known Windows/triton ordering issue.
+# Suppress HF transfer (improves stability on Windows)
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
+# Pre-warm triton and torch._inductor THEN import unsloth at module level.
+# On Windows, unsloth crashes silently (os._exit) if triton is not already
+# cached in sys.modules when unsloth_zoo initialises. Importing them here
+# — before any other heavy imports like datasets or trl — fixes the ordering.
 try:
     import triton
     from torch._inductor.runtime.hints import DeviceProperties
 except Exception:
     pass
 
-# Suppress HF transfer (improves stability on Windows)
-os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+from datasets import load_dataset
+from unsloth import FastLanguageModel
+from trl import SFTTrainer
+from transformers import TrainingArguments
 
 CONFIGS = {
     "4gb":  "configs.gpu_4gb",
@@ -127,11 +133,6 @@ def main():
     # --------------------------------------------------
     # 1. Load Model
     # --------------------------------------------------
-    from datasets import load_dataset
-    from unsloth import FastLanguageModel
-    from trl import SFTTrainer
-    from transformers import TrainingArguments
-
     print(f"Loading {cfg['model_name']} in 4-bit...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["model_name"],
