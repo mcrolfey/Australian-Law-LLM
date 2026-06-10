@@ -121,12 +121,16 @@ def load_model(args):
     return model, tokenizer
 
 
-def build_chat_prompt(tokenizer, history: list[dict], user_message: str) -> str:
-    """Build a prompt in the Alpaca instruction format, incorporating chat history."""
+def build_chat_prompt(tokenizer, history: list, user_message: str) -> str:
+    """Build a prompt in the Alpaca instruction format, incorporating chat history.
+    history is a list of (user_msg, bot_msg) tuples (Gradio 6 default format).
+    """
     history_text = ""
-    for turn in history[-6:]:  # keep last 3 exchanges as context
-        role = turn["role"].capitalize()
-        history_text += f"\n{role}: {turn['content']}"
+    for user_turn, bot_turn in history[-3:]:   # keep last 3 exchanges as context
+        if user_turn:
+            history_text += f"\nUser: {user_turn}"
+        if bot_turn:
+            history_text += f"\nAssistant: {bot_turn}"
 
     alpaca_prompt = """\
 Below is an instruction that describes a legal task. Write a response that appropriately completes the request.
@@ -167,28 +171,10 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512) 
 
 
 def create_ui(model, tokenizer):
-    def chat(user_message: str, history: list):
-        if not user_message.strip():
-            return "", history
-
-        prompt = build_chat_prompt(tokenizer, history, user_message)
-        response = generate_response(model, tokenizer, prompt)
-
-        history.append({"role": "user",      "content": user_message})
-        history.append({"role": "assistant", "content": response})
-        return "", history
-
     def clear_history():
         return [], []
 
-    with gr.Blocks(
-        title="Australian Law LLM",
-        theme=gr.themes.Soft(primary_hue="blue"),
-        css="""
-            .gradio-container { max-width: 900px !important; margin: auto; }
-            footer { display: none !important; }
-        """,
-    ) as demo:
+    with gr.Blocks(title="Australian Law LLM") as demo:
         gr.Markdown(
             """
 # 🇦🇺 Australian Law LLM
@@ -203,7 +189,6 @@ Ask questions about Australian legislation, case law, legal principles, or speci
         chatbot = gr.Chatbot(
             label="Conversation",
             height=520,
-            type="messages",
             show_copy_button=True,
             avatar_images=(None, "https://upload.wikimedia.org/wikipedia/commons/8/88/Flag_of_Australia_%28converted%29.svg"),
         )
@@ -223,14 +208,13 @@ Ask questions about Australian legislation, case law, legal principles, or speci
         with gr.Accordion("Generation settings", open=False):
             max_tokens = gr.Slider(64, 1024, value=512, step=64, label="Max new tokens")
 
-        # Wire events
+        # Wire events — history is list of (user, bot) tuples in Gradio 6
         def chat_with_tokens(user_message, history, max_tok):
             if not user_message.strip():
                 return "", history
             prompt = build_chat_prompt(tokenizer, history, user_message)
             response = generate_response(model, tokenizer, prompt, max_new_tokens=max_tok)
-            history.append({"role": "user",      "content": user_message})
-            history.append({"role": "assistant", "content": response})
+            history = history + [(user_message, response)]
             return "", history
 
         msg.submit(chat_with_tokens, [msg, chatbot, max_tokens], [msg, chatbot])
@@ -265,8 +249,10 @@ def main():
     demo.launch(
         server_name="127.0.0.1",
         server_port=args.port,
-        share=False,          # keep local-only; set True for a temporary public URL
-        inbrowser=True,       # auto-open browser
+        share=False,
+        inbrowser=True,
+        theme=gr.themes.Soft(primary_hue="blue"),
+        css=".gradio-container { max-width: 900px !important; margin: auto; } footer { display: none !important; }",
     )
 
 
