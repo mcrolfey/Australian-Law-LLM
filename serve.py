@@ -13,6 +13,15 @@ Usage:
 import argparse
 import gc
 import os
+
+# Pre-warm triton and torch._inductor before unsloth is imported.
+# On Windows, unsloth crashes silently if these are not already cached
+# in sys.modules when it loads. This is a known Windows/triton ordering issue.
+try:
+    import triton
+    from torch._inductor.runtime.hints import DeviceProperties
+except Exception:
+    pass
 import torch
 import gradio as gr
 from unsloth import FastLanguageModel

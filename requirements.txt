@@ -16,3 +16,8 @@ gradio>=5.0.0
 
 # Utilities
 torch>=2.4.0
+
+# Windows: triton-windows 3.2.x is required — 3.7.x breaks torch._inductor
+# Install torch FIRST via: pip install torch --index-url https://download.pytorch.org/whl/cu124
+# then: pip install triton-windows==3.2.0.post21
+triton-windows==3.2.0.post21; sys_platform == "win32"

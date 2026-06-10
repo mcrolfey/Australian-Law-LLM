@@ -16,6 +16,15 @@ import argparse
 import importlib
 import torch
 
+# Pre-warm triton and torch._inductor before unsloth is imported.
+# On Windows, unsloth crashes silently if these are not already cached
+# in sys.modules when it loads. This is a known Windows/triton ordering issue.
+try:
+    import triton
+    from torch._inductor.runtime.hints import DeviceProperties
+except Exception:
+    pass
+
 # Suppress HF transfer (improves stability on Windows)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
