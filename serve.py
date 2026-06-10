@@ -189,8 +189,6 @@ Ask questions about Australian legislation, case law, legal principles, or speci
         chatbot = gr.Chatbot(
             label="Conversation",
             height=520,
-            show_copy_button=True,
-            avatar_images=(None, "https://upload.wikimedia.org/wikipedia/commons/8/88/Flag_of_Australia_%28converted%29.svg"),
         )
 
         with gr.Row():
