@@ -90,8 +90,11 @@ def main():
         for key, desc in GPU_DESCRIPTIONS.items():
             print(f"  --gpu {key:5s}  {desc}")
         vram = detect_vram_gb()
-        suggestion = suggest_config()
-        print(f"\nDetected VRAM: {vram:.1f} GB  →  Suggested config: --gpu {suggestion}\n")
+        if vram > 0:
+            suggestion = suggest_config()
+            print(f"\nDetected VRAM: {vram:.1f} GB  →  Suggested config: --gpu {suggestion}\n")
+        else:
+            print("\nCould not detect GPU VRAM — specify --gpu manually based on the table above.\n")
         sys.exit(0)
 
     cfg = load_config(args.gpu)
