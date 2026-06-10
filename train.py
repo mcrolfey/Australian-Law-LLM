@@ -29,10 +29,7 @@ try:
 except Exception:
     pass
 
-from datasets import load_dataset
 from unsloth import FastLanguageModel
-from trl import SFTTrainer
-from transformers import TrainingArguments
 
 CONFIGS = {
     "4gb":  "configs.gpu_4gb",
@@ -133,6 +130,10 @@ def main():
     # --------------------------------------------------
     # 1. Load Model
     # --------------------------------------------------
+    from datasets import load_dataset
+    from trl import SFTTrainer
+    from transformers import TrainingArguments
+
     print(f"Loading {cfg['model_name']} in 4-bit...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["model_name"],
