@@ -123,14 +123,13 @@ def load_model(args):
 
 def build_chat_prompt(tokenizer, history: list, user_message: str) -> str:
     """Build a prompt in the Alpaca instruction format, incorporating chat history.
-    history is a list of (user_msg, bot_msg) tuples (Gradio 6 default format).
+    history is a list of {'role': ..., 'content': ...} dicts (Gradio 6 format).
     """
     history_text = ""
-    for user_turn, bot_turn in history[-3:]:   # keep last 3 exchanges as context
-        if user_turn:
-            history_text += f"\nUser: {user_turn}"
-        if bot_turn:
-            history_text += f"\nAssistant: {bot_turn}"
+    for msg in history[-6:]:   # keep last 3 exchanges (6 messages) as context
+        role = msg.get("role", "").capitalize()
+        content = msg.get("content", "")
+        history_text += f"\n{role}: {content}"
 
     alpaca_prompt = """\
 Below is an instruction that describes a legal task. Write a response that appropriately completes the request.
@@ -206,13 +205,16 @@ Ask questions about Australian legislation, case law, legal principles, or speci
         with gr.Accordion("Generation settings", open=False):
             max_tokens = gr.Slider(64, 1024, value=512, step=64, label="Max new tokens")
 
-        # Wire events — history is list of (user, bot) tuples in Gradio 6
+        # Wire events — history is list of {'role','content'} dicts in Gradio 6
         def chat_with_tokens(user_message, history, max_tok):
             if not user_message.strip():
                 return "", history
             prompt = build_chat_prompt(tokenizer, history, user_message)
             response = generate_response(model, tokenizer, prompt, max_new_tokens=max_tok)
-            history = history + [(user_message, response)]
+            history = history + [
+                {"role": "user",      "content": user_message},
+                {"role": "assistant", "content": response},
+            ]
             return "", history
 
         msg.submit(chat_with_tokens, [msg, chatbot, max_tokens], [msg, chatbot])
