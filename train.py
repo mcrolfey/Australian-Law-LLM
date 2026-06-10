@@ -14,21 +14,22 @@ import gc
 import sys
 import argparse
 import importlib
-import torch
 
 # Suppress HF transfer (improves stability on Windows)
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
-# Pre-warm triton and torch._inductor THEN import unsloth at module level.
-# On Windows, unsloth crashes silently (os._exit) if triton is not already
-# cached in sys.modules when unsloth_zoo initialises. Importing them here
-# — before any other heavy imports like datasets or trl — fixes the ordering.
+# WINDOWS IMPORT ORDER FIX:
+# triton must be imported BEFORE torch so that torch._inductor finds triton
+# already in sys.modules during its own initialisation. If torch runs first,
+# its internal inductor setup happens without triton and unsloth later dies
+# silently via os._exit(). This ordering mirrors the working debug test.
 try:
     import triton
     from torch._inductor.runtime.hints import DeviceProperties
 except Exception:
     pass
 
+import torch
 from unsloth import FastLanguageModel
 
 CONFIGS = {
