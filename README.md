@@ -41,20 +41,20 @@ git clone https://github.com/mcrolfey/Australian-Law-LLM.git
 cd Australian-Law-LLM
 ```
 
-### 2. Create a virtual environment with Python 3.11
+### 2. Create a conda environment
+
+[Miniconda](https://docs.conda.io/en/latest/miniconda.html) is the recommended way to manage the environment on Windows — it handles PATH correctly and avoids venv activation issues.
 
 ```bash
-# Windows
-py -3.11 -m venv venv
-venv\Scripts\activate
-
-# Linux / macOS
-python3.11 -m venv venv
-source venv/bin/activate
+conda create -n aus-law python=3.11 -y
+conda activate aus-law
 
 # Verify
 python --version   # must show 3.11.x
 ```
+
+> **venv alternative (Linux/macOS only):**
+> `python3.11 -m venv venv && source venv/bin/activate`
 
 ### 3. Install PyTorch with CUDA
 
