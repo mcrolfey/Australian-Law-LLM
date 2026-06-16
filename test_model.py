@@ -50,9 +50,9 @@ You are an expert Australian legal assistant. Answer the following question accu
         out = model.generate(
             **inputs,
             max_new_tokens=MAX_NEW_TOKENS,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.1,
+            use_cache=True,
+            temperature=0.2,
+            repetition_penalty=1.15,
             do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )

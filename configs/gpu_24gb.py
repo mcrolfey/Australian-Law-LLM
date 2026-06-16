@@ -21,13 +21,16 @@ CONFIG = {
     # Training
     "per_device_train_batch_size": 2,
     "gradient_accumulation_steps": 4,
-    "warmup_steps": 10,
-    "max_steps": 200,
-    "learning_rate": 2e-4,
+    "warmup_steps": 50,
+    "max_steps": 1000,
+    "learning_rate": 5e-5,
     "optim": "adamw_8bit",
-    "weight_decay": 0.01,
+    "weight_decay": 0.1,
     "lr_scheduler_type": "cosine",
     "seed": 3407,
+
+    # Logging
+    "logging_steps": 10,
 
     # Dataset
     "dataset_num_proc": 4,

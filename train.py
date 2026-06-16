@@ -1,12 +1,20 @@
 """
-Australian Law LLM - Fine-Tuning Script
-========================================
-Fine-tunes a LLaMA model on the Open Australian Legal Corpus using Unsloth.
+Australian Law LLM - SFT Fine-Tuning Script (Pipeline Step 2)
+==============================================================
+Trains the model to follow Q&A instructions on Australian law.
+
+This is STEP 2 of the two-step pipeline:
+  Step 1 (cpt_train.py) — Continued Pre-Training on raw legal text
+                           → output: lora_cpt_law_model/
+  Step 2 (this script)  — SFT on Q&A pairs, optionally starting from
+                           the CPT-adapted weights instead of the base model
+                           → output: lora_australian_law_model/
 
 Usage:
-    python train.py --gpu 8gb          # pick a config tier
+    python train.py --gpu 8gb                          # train from base model
+    python train.py --gpu 8gb --cpt-model lora_cpt_law_model  # train from CPT adapters (recommended)
     python train.py --gpu 16gb --steps 200
-    python train.py --list-configs     # show available GPU configs
+    python train.py --list-configs
 """
 
 import os
@@ -64,6 +72,13 @@ def parse_args():
         help="Override max_steps from config",
     )
     parser.add_argument(
+        "--cpt-model",
+        default=None,
+        help="Path to CPT LoRA adapter directory from cpt_train.py (Step 1). "
+             "When set, SFT starts from the domain-adapted weights instead of "
+             "the raw base model, which reduces hallucination.",
+    )
+    parser.add_argument(
         "--list-configs",
         action="store_true",
         help="Print available GPU configs and exit",
@@ -74,6 +89,60 @@ def parse_args():
 def load_config(gpu_tier: str):
     module = importlib.import_module(CONFIGS[gpu_tier])
     return module.CONFIG
+
+
+def download_model_with_retry(model_name: str, max_retries: int = 20, wait: int = 15) -> str:
+    import socket
+    import time
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+
+    socket.setdefaulttimeout(60)
+
+    try:
+        import hf_transfer  # noqa: F401
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+        print("  hf_transfer enabled — using fast multi-threaded downloader")
+    except ImportError:
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        print("  Tip: pip install hf_transfer  for 5x faster downloads")
+
+    WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".pt", ".ckpt", ".msgpack", ".h5")
+
+    def weights_present(directory: str) -> bool:
+        try:
+            return any(f.endswith(WEIGHT_EXTENSIONS) for f in os.listdir(directory))
+        except OSError:
+            return False
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            print(f"Downloading {model_name}  (attempt {attempt}/{max_retries}) ...")
+            local_dir = snapshot_download(
+                repo_id=model_name,
+                repo_type="model",
+                resume_download=True,
+                local_files_only=False,
+            )
+            if not weights_present(local_dir):
+                raise RuntimeError(
+                    f"Snapshot directory has no weight files: {local_dir}\n"
+                    "The previous download was incomplete. Retrying..."
+                )
+            print(f"Model ready at: {local_dir}\n")
+            return local_dir
+        except (RepositoryNotFoundError, EntryNotFoundError) as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        except Exception as e:
+            if attempt >= max_retries:
+                print(f"Download failed after {max_retries} attempts: {e}")
+                sys.exit(1)
+            print(f"  Download interrupted ({type(e).__name__}: {e})")
+            print(f"  Resuming in {wait}s ...  (attempt {attempt}/{max_retries})")
+            time.sleep(wait)
 
 
 def detect_vram_gb() -> float:
@@ -135,13 +204,46 @@ def main():
     from trl import SFTTrainer
     from transformers import TrainingArguments
 
-    print(f"Loading {cfg['model_name']} in 4-bit...")
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=cfg["model_name"],
-        max_seq_length=cfg["max_seq_length"],
-        dtype=cfg["dtype"],
-        load_in_4bit=cfg["load_in_4bit"],
-    )
+    # --------------------------------------------------
+    # 1a. Determine base model — either raw HF model or CPT-adapted weights
+    # --------------------------------------------------
+    if args.cpt_model:
+        # Load the CPT-adapted base model by merging the CPT LoRA into memory,
+        # then attach a fresh set of SFT LoRA adapters on top.
+        # We use the base model name from the CPT adapter config so the right
+        # architecture is loaded.
+        import json
+        cpt_cfg_path = os.path.join(args.cpt_model, "adapter_config.json")
+        if not os.path.exists(cpt_cfg_path):
+            print(f"ERROR: No adapter_config.json found in '{args.cpt_model}'.")
+            print("Run cpt_train.py first to generate the CPT adapters.")
+            sys.exit(1)
+        with open(cpt_cfg_path) as f:
+            cpt_adapter_cfg = json.load(f)
+        base_model_name = cpt_adapter_cfg["base_model_name_or_path"]
+        print(f"Loading CPT-adapted model: {base_model_name} + {args.cpt_model}")
+        local_cpt_base = download_model_with_retry(base_model_name)
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=local_cpt_base,
+            max_seq_length=cfg["max_seq_length"],
+            dtype=cfg["dtype"],
+            load_in_4bit=cfg["load_in_4bit"],
+        )
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.cpt_model)
+        # Merge the CPT weights into the base so the new SFT LoRA sits on top
+        # of the domain-adapted weights, not alongside them.
+        model = model.merge_and_unload()
+        print("CPT adapters merged. Attaching fresh SFT LoRA adapters...")
+    else:
+        local_model_path = download_model_with_retry(cfg["model_name"])
+        print(f"Loading {cfg['model_name']} in 4-bit...")
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=local_model_path,
+            max_seq_length=cfg["max_seq_length"],
+            dtype=cfg["dtype"],
+            load_in_4bit=cfg["load_in_4bit"],
+        )
     tokenizer.padding_side = "right"
 
     # --------------------------------------------------
@@ -221,13 +323,15 @@ Document Type: {}
             learning_rate=cfg["learning_rate"],
             fp16=not torch.cuda.is_bf16_supported(),
             bf16=torch.cuda.is_bf16_supported(),
-            logging_steps=1,
+            logging_steps=cfg.get("logging_steps", 1),
             optim=cfg["optim"],
             weight_decay=cfg["weight_decay"],
             lr_scheduler_type=cfg["lr_scheduler_type"],
             seed=cfg["seed"],
             output_dir=cfg["output_dir"],
-            save_strategy="no",   # Windows: avoids pickle errors during training
+            # Windows pickle bug: torch.save(SFTConfig) fails mid-training.
+            # Intermediate checkpoints are disabled; adapters save at the end.
+            save_strategy="no",
             disable_tqdm=False,
         ),
     )

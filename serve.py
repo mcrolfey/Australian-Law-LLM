@@ -157,9 +157,9 @@ def generate_response(model, tokenizer, prompt: str, max_new_tokens: int = 512) 
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
-            temperature=0.7,
-            top_p=0.9,
-            repetition_penalty=1.1,
+            use_cache=True,
+            temperature=0.35,
+            repetition_penalty=1.15,
             do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )

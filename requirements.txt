@@ -1,25 +1,58 @@
-# Core fine-tuning stack
-unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
-trl>=0.11.0
+# ============================================================
+# Australian Law LLM — Python dependencies
+# ============================================================
+# Install order matters. Follow the README exactly:
+#   1. PyTorch (with CUDA) — must come first
+#   2. triton-windows       — must come before unsloth on Windows
+#   3. unsloth              — install from GitHub, not PyPI
+#   4. transformers==4.56.1 — pin before running pip install -r
+#   5. pip install -r requirements.txt
+# ============================================================
+
+# --- Core fine-tuning stack ---------------------------------
+
+# Unsloth: installed from source (not via this file — see README step 5)
+# pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+
+# transformers: pinned — unsloth 2026.x blocks 4.52–4.55 and 5.x
 transformers==4.56.1
+
+trl>=0.11.0
 peft>=0.13.0
 accelerate>=0.34.0
 bitsandbytes>=0.44.0
 
-# torchao: must be pinned — 0.14+ breaks with torch 2.6 on Windows
+# torchao: pinned — 0.14+ breaks with torch 2.6 on Windows
 torchao==0.13.0
 
-# Dataset & hub
-datasets>=3.0.0
+# unsloth_zoo: pinned — 2026.6.2+ has known issues on Windows
+unsloth_zoo==2026.6.1
+
+# --- Dataset & model hub ------------------------------------
+
+# datasets + pyarrow: pinned together — pyarrow 21+ crashes on Windows (access violation in DLL)
+datasets==3.5.0
+pyarrow==17.0.0
 huggingface-hub>=0.24.0
 kagglehub>=0.3.0
 
-# Web UI
+# hf_transfer: optional but strongly recommended
+# Enables multi-threaded model downloads (5–10x faster, resume-safe)
+# pip install hf_transfer
+hf_transfer
+
+# --- Web UI -------------------------------------------------
+
 gradio>=5.0.0
 
-# torch is installed separately BEFORE this file — see README step 3
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# --- Windows-specific ---------------------------------------
 
-# Windows: triton-windows 3.2.x required — 3.7.x breaks torch._inductor
-# Install AFTER torch: pip install triton-windows==3.2.0.post21
+# triton-windows: must be 3.2.x — 3.7.x breaks torch._inductor silently
+# Install BEFORE unsloth: pip install triton-windows==3.2.0.post21
 triton-windows==3.2.0.post21; sys_platform == "win32"
+
+# ============================================================
+# PyTorch is NOT listed here — install it separately first:
+#   pip install torch torchvision torchaudio \
+#       --index-url https://download.pytorch.org/whl/cu124
+# ============================================================
