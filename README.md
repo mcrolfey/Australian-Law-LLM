@@ -292,6 +292,80 @@ The notebook also has an optional cell to push adapters to a private HuggingFace
 
 ---
 
+## Recursive Self-Evolution (LM Studio)
+
+`self_evolve.py` runs a training loop where a local LLM (via LM Studio) analyses the loss curve after each round and rewrites the hyperparameters for the next round — no cloud, no manual tuning.
+
+### How it works
+
+```
+Round 1: train N steps → capture loss curve
+         ↓
+         Send loss curve + current config to LM Studio
+         LM Studio returns a JSON config patch (new LR, rank, etc.)
+         Apply patch (clamped to safe bounds)
+         ↓
+Round 2: train N steps with updated config → repeat
+```
+
+The LLM sees the last 3 rounds of history so it can track whether its changes are actually helping.
+
+### Prerequisites
+
+1. [LM Studio](https://lmstudio.ai/) installed and running with any model loaded
+2. Local server enabled in LM Studio (`☰ → Local Server → Start Server`)
+3. `pip install openai`
+
+### Run
+
+```bash
+# 5 rounds, 200 steps each (recommended first run — ~2 hr total on RTX 3070)
+python self_evolve.py --gpu 8gb --rounds 5 --steps-per-round 200
+
+# Quick test — 3 rounds, 50 steps each
+python self_evolve.py --gpu 8gb --rounds 3 --steps-per-round 50
+
+# Custom LM Studio URL or model
+python self_evolve.py --gpu 8gb --rounds 5 --steps-per-round 200 \
+    --lm-studio-url http://localhost:1234 \
+    --lm-studio-model "llama-3-8b-instruct"
+```
+
+### Outputs
+
+All outputs land in `self_evolve_output/` (override with `--output-dir`):
+
+| Path | Contents |
+|------|----------|
+| `self_evolve_output/evolution_log.json` | Full history: every round's config, loss curve, LM Studio response, and applied changes |
+| `self_evolve_output/round_01_adapter/` | LoRA adapter after round 1 |
+| `self_evolve_output/round_02_adapter/` | LoRA adapter after round 2 (with updated config) |
+| … | … |
+
+After the loop finishes, the script reports which round achieved the lowest end-of-round loss. Serve that adapter directly:
+
+```bash
+python serve.py --model self_evolve_output/round_04_adapter
+```
+
+### Tunable parameters
+
+LM Studio can only modify parameters within these safe bounds — values outside are clamped automatically:
+
+| Parameter | Range |
+|-----------|-------|
+| `learning_rate` | 1e-6 – 1e-3 |
+| `per_device_train_batch_size` | 1 – 4 |
+| `gradient_accumulation_steps` | 1 – 32 |
+| `warmup_steps` | 0 – 200 |
+| `weight_decay` | 0.0 – 0.3 |
+| `r` (LoRA rank) | 4 – 64 |
+| `lora_alpha` | 4 – 128 |
+
+Model architecture, sequence length, and dataset are not modified — only the optimisation hyperparameters.
+
+---
+
 ## Interactive Testing
 
 Test a single question from the command line without launching the web UI:
@@ -377,6 +451,7 @@ Australian-Law-LLM/
 ├── batch_test.py              # Batch eval: 100 questions, fine-tuned vs base
 ├── rag_eval.py                # RAG open-book eval: context-grounded answers
 ├── test_data.json             # 30 question/context pairs for rag_eval.py
+├── self_evolve.py             # Recursive self-evolution loop via LM Studio
 ├── test_model.py              # Interactive single-question CLI
 ├── requirements.txt
 ├── configs/

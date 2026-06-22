@@ -45,6 +45,11 @@ hf_transfer
 
 gradio>=5.0.0
 
+# --- Self-evolution loop ------------------------------------
+
+# openai: used to call LM Studio's OpenAI-compatible local API
+openai>=1.0.0
+
 # --- Windows-specific ---------------------------------------
 
 # triton-windows: must be 3.2.x — 3.7.x breaks torch._inductor silently
