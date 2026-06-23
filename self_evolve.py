@@ -149,7 +149,7 @@ def apply_patch(cfg: dict, patch: dict) -> tuple[dict, list[str]]:
 
 
 def build_lm_studio_prompt(round_num: int, cfg: dict, loss_log: list[dict],
-                            history: list[dict]) -> str:
+                            history: list[dict], sample_answers: str = "") -> str:
     current_config_str = json.dumps(
         {k: cfg[k] for k in TUNABLE_KEYS if k in cfg}, indent=2
     )
@@ -166,6 +166,8 @@ def build_lm_studio_prompt(round_num: int, cfg: dict, loss_log: list[dict],
     else:
         history_str = "  (no previous rounds)"
 
+    sample_section = f"\nSample model answers (first 5 benchmark questions):\n{sample_answers}" if sample_answers else ""
+
     return f"""You are an expert machine learning engineer helping to optimise hyperparameters for a LLaMA LoRA fine-tuning run on Australian legal text using Unsloth on a Windows machine with an RTX 3070 (8GB VRAM).
 
 TRAINING SUMMARY — Round {round_num}
@@ -178,10 +180,11 @@ Loss curve this round:
 
 Previous rounds:
 {history_str}
+{sample_section}
 
 TASK
 ====
-Analyse the loss curve. If the loss is still decreasing steeply, suggest continuing with similar or slightly higher learning rate. If the loss has plateaued or is noisy, adjust accordingly.
+Analyse the loss curve and the sample answers above. Consider both whether the loss is decreasing AND whether the answers look factually grounded and coherent. If answers are repetitive or hallucinating, suggest a higher repetition penalty or lower learning rate. If the loss is still decreasing steeply, suggest continuing with similar settings.
 
 Respond with ONLY a JSON object containing the keys you want to change from the current config. Only include keys that need changing. Use these exact key names:
 - learning_rate (float, range 1e-6 to 1e-3)
@@ -260,6 +263,193 @@ def load_and_map_dataset(tokenizer, trunc_len: int):
     dataset = dataset.map(formatting_prompts_func, batched=True)
     print(f"  Dataset ready: {len(dataset)} documents\n")
     return dataset
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Benchmark questions (same 100 as batch_test.py)
+# ──────────────────────────────────────────────────────────────────────────────
+QUESTIONS = [
+    "Does the Australian Constitution contain a comprehensive Bill of Rights?",
+    "What is the 'implied freedom of political communication' in Australian constitutional law?",
+    "Explain the constitutional significance of Section 51(xxix) (the external affairs power).",
+    "Under Section 109 of the Australian Constitution, what happens when a State law is inconsistent with a Commonwealth law?",
+    "How is the separation of powers applied differently in Australia compared to the United States?",
+    "What was the legal and historical significance of the Tasmanian Dam Case (1983)?",
+    "Explain the 'Engineers Case' (1920) and how it changed constitutional interpretation in Australia.",
+    "What is the role of the Governor-General under Section 61 of the Constitution?",
+    "What specific rights does Section 92 of the Constitution guarantee regarding trade and commerce?",
+    "Can the Australian Constitution be amended by an Act of Parliament? Explain the Section 128 mechanism.",
+    "What is the difference between an 'indictable offence' and a 'summary offence' in Australia?",
+    "Is the criminal code uniform across all Australian states and territories? Explain the divide.",
+    "How does the defence of provocation operate in New South Wales compared to Victoria?",
+    "Define the concept of doli incapax as applied in Australian jurisdictions.",
+    "What are the specific elements of murder under the Crimes Act 1900 (NSW)?",
+    "What is the role of the Director of Public Prosecutions (DPP) in Australia?",
+    "Explain the 'Golden Thread' principle in Australian criminal justice (referencing Woolmington).",
+    "How is the concept of 'joint criminal enterprise' defined under Australian common law?",
+    "What is the objective test for criminal negligence in Australian law?",
+    "Does Australia have a universal right to silence when questioned by police? How do 'special warning' provisions work in NSW?",
+    "What constitutes 'unconscionable conduct' under the Australian Consumer Law (ACL)?",
+    "How are consumer guarantees applied under Schedule 2 of the Competition and Consumer Act 2010?",
+    "What is the legal definition of a 'consumer' under the updated Australian Consumer Law?",
+    "Describe the landmark equitable rule established in Commercial Bank of Australia Ltd v Amadio (1983).",
+    "What is the doctrine of promissory estoppel in Australian law following Waltons Stores (Interstate) Ltd v Maher?",
+    "What are the available remedies for a 'major failure' of a consumer guarantee under the ACL?",
+    "Explain the doctrine of privity of contract as it currently stands in Australian law.",
+    "What is the difference between a condition and a warranty in Australian contract law?",
+    "How does the Australian Competition and Consumer Commission (ACCC) enforce anti-competitive behavior?",
+    "Does the postal acceptance rule still apply to email communications under the Electronic Transactions Act 1999 (Cth)?",
+    "How did the Civil Liability Act 2002 (NSW) alter the common law test for the duty of care?",
+    "Explain how a 'duty of care' is established in Australia following the High Court's decision in Sullivan v Moody.",
+    "What are the specific defences available under the uniform Defamation Act 2005 across Australian states?",
+    "How does the defence of 'honest opinion' work in Australian defamation law?",
+    "What is the test for factual causation in Australian tort law (the 'necessary condition' test)?",
+    "Explain the concept of 'vicarious liability' in an Australian employment context.",
+    "How are damages for non-economic loss capped or calculated under Australian personal injury legislation?",
+    "What is the 'volenti non fit injuria' (voluntary assumption of risk) defence under the Civil Liability Acts?",
+    "How is the standard of care for professionals determined in Australia (the modified Bolam test / Rogers v Whitaker)?",
+    "What are the elements of the tort of deceit in Australian common law?",
+    "What are the primary statutory duties of a company director under sections 180-183 of the Corporations Act 2001 (Cth)?",
+    "Explain the 'business judgment rule' under Section 180(2) of the Corporations Act.",
+    "What is the exact role and jurisdiction of the Australian Securities and Investments Commission (ASIC)?",
+    "Describe the legal structure and limitations of a 'proprietary limited' (Pty Ltd) company in Australia.",
+    "Under what specific circumstances can the corporate veil be pierced under Australian law?",
+    "What constitutes insolvent trading, and what are the director's liabilities under Section 588G of the Corporations Act?",
+    "How does the process of Voluntary Administration work in Australia, and how does it differ from US Chapter 11?",
+    "What are the requirements for 'continuous disclosure' under the ASX Listing Rules?",
+    "How does the Personal Property Securities Act 2009 (Cth) (PPSA) operate regarding security interests?",
+    "What is a 'scheme of arrangement' under Part 5.1 of the Corporations Act?",
+    "Explain the 'Torrens title system' used in Australian real estate.",
+    "What does the concept of 'indefeasibility of title' mean in Australian property law?",
+    "What was the legal and historical significance of the High Court's decision in Mabo v Queensland (No 2) (1992)?",
+    "How is 'native title' defined and claimed under the Native Title Act 1993 (Cth)?",
+    "What is the legal difference between a joint tenancy and a tenancy in common in Australia?",
+    "Explain the doctrine of adverse possession as it applies in Victoria or New South Wales.",
+    "What is a 'caveat', and how is it used to protect unregistered interests in the Australian property system?",
+    "How are easements legally created under Australian property law?",
+    "What rights and statutory obligations does a mortgagee have when exercising a power of sale in Australia?",
+    "Does the rule against perpetuities still exist in Australian states, and if so, how has it been modified?",
+    "What does the 'no-fault' divorce principle mean under the Family Law Act 1975 (Cth)?",
+    "How do Australian courts determine the 'best interests of the child' under Section 60CC?",
+    "What factors must the court consider in a property settlement under Section 79 of the Family Law Act?",
+    "How is a 'de facto relationship' legally defined under Australian federal law?",
+    "What is the role of an Independent Children's Lawyer (ICL) in Australian family court proceedings?",
+    "How are superannuation interests treated in Australian family law property settlements?",
+    "Explain the presumption of 'equal shared parental responsibility' (and note any recent legislative changes to this concept).",
+    "What constitutes 'family violence' under the Family Law Act 1975?",
+    "What are the strict legal requirements to make a Binding Financial Agreement (BFA) enforceable in Australia?",
+    "What is the jurisdictional role of the Federal Circuit and Family Court of Australia (FCFCOA)?",
+    "What is the fundamental difference between 'merits review' and 'judicial review' in Australia?",
+    "Explain the jurisdiction and function of the Administrative Appeals Tribunal (AAT) (or the new Administrative Review Tribunal).",
+    "What are the specific grounds for judicial review under the Administrative Decisions (Judicial Review) Act 1977 (ADJR Act)?",
+    "How does the concept of 'procedural fairness' or 'natural justice' apply to Australian administrative decision-makers?",
+    "What is the 'hearing rule' and the 'bias rule' in Australian administrative law?",
+    "What was the legal significance of Minister for Immigration and Citizenship v Li (2013) regarding legal unreasonableness?",
+    "Explain the concept of 'jurisdictional error' in Australian law.",
+    "How do 'privative clauses' operate, and how did the High Court treat them in Plaintiff S157/2002?",
+    "What is the role of the Commonwealth Ombudsman?",
+    "How is legal standing (locus standi) established for judicial review in Australian courts?",
+    "Does Australia require copyright registration for copyright protection to apply to a work?",
+    "What constitutes 'fair dealing' under the Copyright Act 1968 (Cth), and how does it differ from US 'fair use'?",
+    "How long does a standard patent last under the Patents Act 1990 (Cth)?",
+    "What are the Australian Privacy Principles (APPs) under the Privacy Act 1988?",
+    "Explain the concept of 'moral rights' as protected under Australian copyright law.",
+    "What is the primary role of the Fair Work Commission in Australia?",
+    "List and explain three of the National Employment Standards (NES) under the Fair Work Act 2009.",
+    "What legally constitutes an 'unfair dismissal' in Australia?",
+    "How does the common law tort of 'passing off' operate in Australia compared to statutory trademark infringement?",
+    "Are non-compete clauses automatically enforceable in Australian employment contracts? Explain the restraint of trade doctrine.",
+    "Format a standard AGLC4 citation for a High Court of Australia case decided in 2022.",
+    "Explain the hierarchy of courts in the state of Victoria, from the lowest court to the highest.",
+    "Draft a brief boilerplate jurisdiction and governing law clause for a commercial contract specifying New South Wales.",
+    "What is the purpose of a 'Statement of Claim' versus a 'Notice of Motion' in Australian civil procedure?",
+    "How does the practice of 'discovery' operate under the Federal Court Rules 2011?",
+    "What is the 'Uniform Evidence Law' framework, and which Australian jurisdictions have adopted it?",
+    "How is legal professional privilege defined and applied under the Evidence Act 1995 (Cth)?",
+    "What are the formal execution requirements for a valid deed in Queensland?",
+    "Explain the strict professional distinction between a 'barrister' and a 'solicitor' in the Australian legal system.",
+    "What is a 'costs order' in Australian civil litigation, and what does 'costs follow the event' mean?",
+]
+
+EVAL_PROMPT_TEMPLATE = """\
+Below is an instruction that describes a legal task. Write a response that appropriately completes the request.
+
+### Instruction:
+You are an expert Australian legal assistant trained on the Open Australian Legal Corpus. \
+Answer the following question accurately, citing relevant legislation or case law where appropriate.
+
+### Input:
+{question}
+
+### Response:
+"""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Post-round evaluation — run all 100 questions
+# ──────────────────────────────────────────────────────────────────────────────
+def evaluate_round(cfg: dict, adapter_dir: str, output_dir: Path,
+                   round_num: int) -> list[dict]:
+    """Load the just-trained adapter and run all 100 benchmark questions."""
+    from unsloth import FastLanguageModel
+    from peft import PeftModel
+
+    print(f"\n  Running benchmark evaluation ({len(QUESTIONS)} questions)...")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=cfg["model_name"],
+        max_seq_length=cfg["max_seq_length"],
+        dtype=cfg["dtype"],
+        load_in_4bit=cfg["load_in_4bit"],
+    )
+    model = PeftModel.from_pretrained(model, adapter_dir)
+    FastLanguageModel.for_inference(model)
+    tokenizer.padding_side = "left"
+
+    results = []
+    t0 = time.time()
+    for i, question in enumerate(QUESTIONS, start=1):
+        prompt = EVAL_PROMPT_TEMPLATE.format(question=question)
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                use_cache=True,
+                temperature=0.2,
+                repetition_penalty=1.15,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        answer = tokenizer.decode(
+            out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        ).strip()
+        results.append({"q": i, "question": question, "answer": answer})
+        if i % 10 == 0:
+            print(f"    {i}/{len(QUESTIONS)}  ({(time.time()-t0)/60:.1f} min elapsed)")
+
+    # Save readable txt
+    txt_path = output_dir / f"round_{round_num:02d}_answers.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"ROUND {round_num} — BENCHMARK ANSWERS\n")
+        f.write("=" * 70 + "\n\n")
+        for r in results:
+            f.write(f"Q{r['q']:03d}. {r['question']}\n")
+            f.write("-" * 70 + "\n")
+            f.write(r["answer"] + "\n\n")
+
+    # Save JSON
+    json_path = output_dir / f"round_{round_num:02d}_answers.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+
+    print(f"  Evaluation done in {(time.time()-t0)/60:.1f} min")
+    print(f"  Results saved → {txt_path}")
+
+    del model, tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    return results
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -431,9 +621,18 @@ def main():
         print(f"\n  Round {round_num} complete in {elapsed/60:.1f} min  "
               f"| loss: {start_loss:.4f} → {end_loss:.4f}")
 
+        # ── Evaluate all 100 questions ──
+        eval_results = evaluate_round(cfg, adapter_dir, output_dir, round_num)
+        # Pass 5 sample answers to LM Studio so it has quality signal
+        sample_answers = "\n\n".join(
+            f"Q: {r['question']}\nA: {r['answer'][:300]}{'...' if len(r['answer']) > 300 else ''}"
+            for r in eval_results[:5]
+        )
+
         # ── Ask LM Studio ──
         print("\n  Querying LM Studio for config improvements...")
-        prompt   = build_lm_studio_prompt(round_num, cfg, loss_log, history)
+        prompt   = build_lm_studio_prompt(round_num, cfg, loss_log, history,
+                                          sample_answers)
         response = ask_lm_studio(lm_client, lm_model, prompt)
         print(f"  LM Studio response:\n    {response[:300].replace(chr(10), ' ')}")
 
@@ -449,16 +648,17 @@ def main():
 
         # ── Record history ──
         record = {
-            "round":       round_num,
-            "timestamp":   datetime.now().isoformat(),
-            "config":      {k: cfg[k] for k in TUNABLE_KEYS if k in cfg},
-            "loss_log":    loss_log,
-            "start_loss":  start_loss,
-            "end_loss":    end_loss,
-            "lm_response": response,
-            "patch":       patch,
-            "changes":     changes,
-            "adapter_dir": adapter_dir,
+            "round":        round_num,
+            "timestamp":    datetime.now().isoformat(),
+            "config":       {k: cfg[k] for k in TUNABLE_KEYS if k in cfg},
+            "loss_log":     loss_log,
+            "start_loss":   start_loss,
+            "end_loss":     end_loss,
+            "lm_response":  response,
+            "patch":        patch,
+            "changes":      changes,
+            "adapter_dir":  adapter_dir,
+            "eval_answers": str(output_dir / f"round_{round_num:02d}_answers.txt"),
         }
         evolution_log.append(record)
         history.append(record)
