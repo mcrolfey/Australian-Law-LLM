@@ -215,15 +215,62 @@ def extract_json(text: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Dataset — loaded once, reused across all rounds
+# ──────────────────────────────────────────────────────────────────────────────
+ALPACA_PROMPT = """\
+Below is an instruction that describes a legal task, paired with an input that provides further context. Write a response that appropriately completes the request.
+
+### Instruction:
+Analyze the following Australian legal document. Synthesize its legal principles based on the provided jurisdiction and context framework.
+
+### Input:
+Citation: {}
+Jurisdiction: {}
+Document Type: {}
+
+### Response:
+{}"""
+
+
+def load_and_map_dataset(tokenizer, trunc_len: int):
+    """Download (or use cache) and map the corpus. Called once before the loop."""
+    from datasets import load_dataset
+    import kagglehub
+
+    print("Loading Open Australian Legal Corpus (once — reused every round)...")
+    dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
+    corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
+    dataset = load_dataset("json", data_files=corpus_path, split="train")
+
+    EOS_TOKEN = tokenizer.eos_token
+
+    def formatting_prompts_func(examples):
+        citations     = examples.get("citation",     ["Unknown"] * len(examples["text"]))
+        jurisdictions = examples.get("jurisdiction", ["Unknown"] * len(examples["text"]))
+        types         = examples.get("type",         ["Unknown"] * len(examples["text"]))
+        texts         = examples["text"]
+        formatted = []
+        for citation, jurisdiction, doc_type, text in zip(citations, jurisdictions, types, texts):
+            raw = ALPACA_PROMPT.format(citation, jurisdiction, doc_type, text or "") + EOS_TOKEN
+            tokens = tokenizer.encode(raw, truncation=True, max_length=trunc_len)
+            formatted.append(tokenizer.decode(tokens, skip_special_tokens=False))
+        return {"text": formatted}
+
+    print("Mapping dataset (this runs once)...")
+    dataset = dataset.map(formatting_prompts_func, batched=True)
+    print(f"  Dataset ready: {len(dataset)} documents\n")
+    return dataset
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────────────────────────────────────
-def run_training_round(cfg: dict, steps: int, adapter_dir: str) -> list[dict]:
+def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset) -> list[dict]:
     """
-    Run one training round. Returns the loss log as a list of
-    {"step": int, "loss": float} dicts.
+    Run one training round with a pre-mapped dataset.
+    Returns the loss log as a list of {"step": int, "loss": float} dicts.
     """
     from unsloth import FastLanguageModel
-    from datasets import load_dataset
     from trl import SFTTrainer
     from transformers import TrainingArguments
 
@@ -252,43 +299,6 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str) -> list[dict]:
         random_state=cfg.get("seed", 3407),
     )
 
-    # Dataset
-    import kagglehub
-    dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
-    corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
-    dataset = load_dataset("json", data_files=corpus_path, split="train")
-
-    alpaca_prompt = """\
-Below is an instruction that describes a legal task, paired with an input that provides further context. Write a response that appropriately completes the request.
-
-### Instruction:
-Analyze the following Australian legal document. Synthesize its legal principles based on the provided jurisdiction and context framework.
-
-### Input:
-Citation: {}
-Jurisdiction: {}
-Document Type: {}
-
-### Response:
-{}"""
-
-    EOS_TOKEN = tokenizer.eos_token
-    trunc_len = cfg.get("token_truncation_length", 500)
-
-    def formatting_prompts_func(examples):
-        citations     = examples.get("citation",     ["Unknown"] * len(examples["text"]))
-        jurisdictions = examples.get("jurisdiction", ["Unknown"] * len(examples["text"]))
-        types         = examples.get("type",         ["Unknown"] * len(examples["text"]))
-        texts         = examples["text"]
-        formatted = []
-        for citation, jurisdiction, doc_type, text in zip(citations, jurisdictions, types, texts):
-            raw = alpaca_prompt.format(citation, jurisdiction, doc_type, text or "") + EOS_TOKEN
-            tokens = tokenizer.encode(raw, truncation=True, max_length=trunc_len)
-            formatted.append(tokenizer.decode(tokens, skip_special_tokens=False))
-        return {"text": formatted}
-
-    dataset = dataset.map(formatting_prompts_func, batched=True)
-
     # Loss callback
     loss_log = []
 
@@ -302,7 +312,7 @@ Document Type: {}
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
-        train_dataset=dataset,
+        train_dataset=dataset,   # pre-mapped — no remapping here
         dataset_text_field="text",
         max_seq_length=cfg["max_seq_length"],
         dataset_num_proc=cfg.get("dataset_num_proc", 1),
@@ -380,6 +390,21 @@ def main():
     cfg = load_base_config(args.gpu)
     cfg["max_steps"] = args.steps_per_round
 
+    # Load and map dataset ONCE — shared across all rounds, no remapping
+    from unsloth import FastLanguageModel
+    _init_model, _init_tokenizer = FastLanguageModel.from_pretrained(
+        model_name=cfg["model_name"],
+        max_seq_length=cfg["max_seq_length"],
+        dtype=cfg["dtype"],
+        load_in_4bit=cfg["load_in_4bit"],
+    )
+    shared_dataset = load_and_map_dataset(
+        _init_tokenizer, cfg.get("token_truncation_length", 500)
+    )
+    del _init_model, _init_tokenizer
+    gc.collect()
+    torch.cuda.empty_cache()
+
     history = []
 
     for round_num in range(1, args.rounds + 1):
@@ -394,7 +419,7 @@ def main():
 
         # ── Train ──
         t0 = time.time()
-        loss_log = run_training_round(cfg, args.steps_per_round, adapter_dir)
+        loss_log = run_training_round(cfg, args.steps_per_round, adapter_dir, shared_dataset)
         elapsed = time.time() - t0
 
         if not loss_log:
