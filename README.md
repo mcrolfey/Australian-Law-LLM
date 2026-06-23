@@ -114,20 +114,40 @@ The dataset is downloaded on first run and cached locally. Subsequent runs use t
 
 ---
 
-## Training
+## Training Pipeline
 
-### Why two steps?
+The full pipeline has three stages. Each stage builds on the last.
 
-Training a language model directly on Q&A pairs (SFT) when it has never read Australian law causes hallucination. The model has no knowledge of specific Acts, sections, or cases, so it generates confident-sounding but incorrect answers.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 1 — CPT (cpt_train.py)                                       │
+│  Feed raw Acts and judgments. Model learns what the law says.        │
+│  Output: lora_cpt_law_model/                                         │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 2 — SFT (train.py)                                           │
+│  Teach the model to answer questions in Alpaca format.               │
+│  Optionally starts from CPT weights (--cpt-model flag).              │
+│  Output: lora_australian_law_model/                                  │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 3 — Self-Evolution (self_evolve.py)                           │
+│  Trains for N steps → evaluates all 100 benchmark questions →        │
+│  sends loss curve + answers to LM Studio (Gemma 4 26B locally) →    │
+│  LM Studio suggests hyperparameter changes → repeats for K rounds.  │
+│  Output: self_evolve_output/round_NN_adapter/ + round_NN_answers.txt │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-The two-step pipeline fixes this:
+You can run any stage independently. Running all three gives the best results: CPT grounds the model in real legal text, SFT teaches it to answer questions, and self-evolution iteratively improves the hyperparameters using a local LLM as the judge.
 
-| Step | Script | Purpose | Output |
-|------|--------|---------|--------|
-| **1 — CPT** | `cpt_train.py` | Read raw legal text. The model learns *what* the law says. | `lora_cpt_law_model/` |
-| **2 — SFT** | `train.py` | Learn to answer questions. The model learns *how* to respond. | `lora_australian_law_model/` |
+### Why three stages?
 
-You can skip Step 1 and run Step 2 alone, but expect more factual errors in the output.
+Training directly on Q&A pairs (SFT alone) causes hallucination — the model has no knowledge of specific Acts, sections, or cases, so it generates confident-sounding but incorrect answers. CPT fixes the factual gap. Self-evolution then continuously improves training quality by observing the model's actual answers across 100 benchmark questions, not just the loss curve.
 
 ---
 
@@ -198,9 +218,62 @@ python train.py --gpu 8gb --steps 200
 | `--gpu 16gb` | Llama-3.2-3B | 1024 | 1000 | 5e-5 | ~3 hr    |
 | `--gpu 24gb` | Llama-3.1-8B | 2048 | 1000 | 5e-5 | ~5 hr    |
 
-All configs use cosine LR decay, 50 warmup steps, weight decay 0.1, and save a checkpoint every 200 steps. Override steps with `--steps N` for a quicker test run.
+All configs use cosine LR decay, 50 warmup steps, weight decay 0.1. Override steps with `--steps N` for a quicker test run.
 
 Training saves LoRA adapters to `lora_australian_law_model/` on completion.
+
+---
+
+### Stage 3: Recursive Self-Evolution
+
+Self-evolution runs a closed loop: train → evaluate → consult LM Studio → update hyperparameters → repeat. Unlike standard training, it observes the model's actual answers — not just the loss — and uses a local LLM (running in LM Studio) to decide how to improve.
+
+**Prerequisites:**
+1. LM Studio installed and running with a model loaded (tested with `google/gemma-4-26b-a4b`)
+2. LM Studio local server enabled (default port 1234)
+3. `pip install openai` (uses the OpenAI-compatible LM Studio API)
+
+```bash
+# 5 rounds of 200 steps each — recommended starting point
+python self_evolve.py --gpu 8gb --rounds 5 --steps-per-round 200
+
+# More rounds for deeper optimisation
+python self_evolve.py --gpu 8gb --rounds 10 --steps-per-round 100
+
+# Custom LM Studio URL
+python self_evolve.py --gpu 8gb --rounds 5 --steps-per-round 200 --lm-studio-url http://localhost:1234
+```
+
+**What happens each round:**
+
+1. **Train** — fine-tune for `--steps-per-round` steps with the current hyperparameters
+2. **Evaluate** — run all 100 benchmark questions through the freshly trained adapter and save answers to `round_NN_answers.txt`
+3. **Consult** — send the loss curve and all 100 answers to LM Studio; Gemma 4's 128k context window means every answer is sent in full with no truncation
+4. **Update** — apply the hyperparameter changes suggested by LM Studio (learning rate, LoRA rank, batch size, weight decay, warmup steps), clamped to safe bounds
+5. **Repeat** for the next round
+
+**Output files per round:**
+
+| File | Contents |
+|------|----------|
+| `self_evolve_output/round_NN_adapter/` | LoRA adapter weights for that round |
+| `self_evolve_output/round_NN_answers.txt` | All 100 benchmark answers — readable |
+| `self_evolve_output/round_NN_answers.json` | All 100 benchmark answers — structured |
+| `self_evolve_output/evolution_log.json` | Full history: configs, loss curves, LM Studio responses, hyperparameter changes |
+
+At the end, the script identifies the round with the lowest final loss and prints its adapter path. Compare `round_01_answers.txt` with `round_05_answers.txt` to see how legal reasoning improved.
+
+**Hyperparameter bounds** (LM Studio cannot push values outside these):
+
+| Parameter | Range |
+|-----------|-------|
+| `learning_rate` | 1e-6 — 1e-3 |
+| `per_device_train_batch_size` | 1 — 4 |
+| `gradient_accumulation_steps` | 1 — 32 |
+| `warmup_steps` | 0 — 200 |
+| `weight_decay` | 0.0 — 0.3 |
+| `r` (LoRA rank) | 4 — 64 |
+| `lora_alpha` | 4 — 128 |
 
 ---
 
