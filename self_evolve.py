@@ -523,6 +523,9 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, prev_adapter_dir)
         model = model.merge_and_unload()
+        # merge_and_unload dequantizes to float32 — cast back to bfloat16
+        # so Unsloth's LoRA kernels don't hit a dtype mismatch on backward
+        model = model.to(torch.bfloat16)
         print("  Previous adapter merged. Attaching fresh LoRA for this round...")
 
     # LoRA
