@@ -259,14 +259,25 @@ Document Type: {}
 {}"""
 
 
+KAGGLE_CACHE = os.path.expanduser(
+    "~/.cache/kagglehub/datasets/umarbutler/open-australian-legal-corpus/versions/2/corpus.jsonl"
+)
+
+
 def load_and_map_dataset(tokenizer, trunc_len: int):
     """Download (or use cache) and map the corpus. Called once before the loop."""
     from datasets import load_dataset
-    import kagglehub
 
     print("Loading Open Australian Legal Corpus (once — reused every round)...")
-    dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
-    corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
+
+    # Use local cache if available — avoids Kaggle DNS failures when offline
+    if os.path.exists(KAGGLE_CACHE):
+        corpus_path = KAGGLE_CACHE
+        print(f"  Using cached corpus: {corpus_path}")
+    else:
+        import kagglehub
+        dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
+        corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
     dataset = load_dataset("json", data_files=corpus_path, split="train")
 
     EOS_TOKEN = tokenizer.eos_token
