@@ -111,13 +111,37 @@ def detect_lm_studio_model(client) -> str:
 
 
 def ask_lm_studio(client, model_id: str, prompt: str) -> str:
-    response = client.chat.completions.create(
-        model=model_id,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=1024,
-    )
-    return response.choices[0].message.content.strip()
+    # Try full prompt first; if LM Studio rejects due to context length,
+    # fall back to progressively shorter answer truncations.
+    for char_limit in [None, 500, 200, 100]:
+        if char_limit is not None:
+            # Truncate each answer block to char_limit characters
+            truncated = []
+            for line in prompt.split("\n"):
+                if line.startswith("A: ") and len(line) > char_limit:
+                    truncated.append(line[:char_limit] + "…")
+                else:
+                    truncated.append(line)
+            send_prompt = "\n".join(truncated)
+            print(f"  [Retrying with answers truncated to {char_limit} chars]")
+        else:
+            send_prompt = prompt
+        try:
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": send_prompt}],
+                temperature=0.2,
+                max_tokens=1024,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if "n_ctx" in str(e) or "context length" in str(e).lower() or "400" in str(e):
+                if char_limit == 100:
+                    print("  ERROR: prompt still too long even after truncation.")
+                    print("  Fix: in LM Studio, reload the model with a larger context (e.g. 32768).")
+                    raise
+                continue
+            raise
 
 
 # ──────────────────────────────────────────────────────────────────────────────
