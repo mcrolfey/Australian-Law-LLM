@@ -190,7 +190,7 @@ def build_lm_studio_prompt(round_num: int, cfg: dict, loss_log: list[dict],
     else:
         history_str = "  (no previous rounds)"
 
-    sample_section = f"\nAll 100 benchmark answers:\n{sample_answers}" if sample_answers else ""
+    sample_section = f"\n20 representative benchmark answers (every 5th question, answers capped at 600 chars):\n{sample_answers}" if sample_answers else ""
 
     return f"""You are an expert machine learning engineer helping to optimise hyperparameters for a LLaMA LoRA fine-tuning run on Australian legal text using Unsloth on a Windows machine with an RTX 3070 (8GB VRAM).
 
@@ -658,10 +658,12 @@ def main():
 
         # ── Evaluate all 100 questions ──
         eval_results = evaluate_round(cfg, adapter_dir, output_dir, round_num)
-        # Send all 100 answers — Gemma 4 has 128k context, no truncation needed
+        # Send every 5th answer (20 total) — representative coverage across all
+        # legal areas without blowing the LM Studio context window.
+        # Each answer capped at 600 chars so multi-line answers don't overflow.
         sample_answers = "\n\n".join(
-            f"Q{r['q']:03d}: {r['question']}\nA: {r['answer']}"
-            for r in eval_results
+            f"Q{r['q']:03d}: {r['question']}\nA: {r['answer'][:600]}{'…' if len(r['answer']) > 600 else ''}"
+            for r in eval_results[::5]
         )
 
         # ── Ask LM Studio ──
