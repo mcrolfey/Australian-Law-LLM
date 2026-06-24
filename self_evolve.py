@@ -490,9 +490,13 @@ def evaluate_round(cfg: dict, adapter_dir: str, output_dir: Path,
 # ──────────────────────────────────────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────────────────────────────────────
-def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset) -> list[dict]:
+def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
+                       prev_adapter_dir: str = None) -> list[dict]:
     """
     Run one training round with a pre-mapped dataset.
+    If prev_adapter_dir is set, merges the previous round's adapter into the
+    base model before attaching fresh LoRA — so each round continues from
+    where the last one left off rather than restarting from scratch.
     Returns the loss log as a list of {"step": int, "loss": float} dicts.
     """
     from unsloth import FastLanguageModel
@@ -511,6 +515,15 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset) -> list
         load_in_4bit=cfg["load_in_4bit"],
     )
     tokenizer.padding_side = "right"
+
+    # If a previous adapter exists, merge it into the base weights so this
+    # round continues training from the end of the last round.
+    if prev_adapter_dir and os.path.isdir(prev_adapter_dir):
+        print(f"  Merging previous adapter: {prev_adapter_dir}")
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, prev_adapter_dir)
+        model = model.merge_and_unload()
+        print("  Previous adapter merged. Attaching fresh LoRA for this round...")
 
     # LoRA
     model = FastLanguageModel.get_peft_model(
@@ -631,6 +644,7 @@ def main():
     torch.cuda.empty_cache()
 
     history = []
+    prev_adapter_dir = None  # updated each round so the next round continues from here
 
     for round_num in range(1, args.rounds + 1):
         print(f"\n{'─'*60}")
@@ -638,13 +652,16 @@ def main():
         print(f"  Config: lr={cfg['learning_rate']}, r={cfg['r']}, "
               f"lora_alpha={cfg['lora_alpha']}, wd={cfg['weight_decay']}, "
               f"warmup={cfg.get('warmup_steps')}, batch={cfg['per_device_train_batch_size']}")
+        if prev_adapter_dir:
+            print(f"  Continuing from: {prev_adapter_dir}")
         print(f"{'─'*60}\n")
 
         adapter_dir = str(output_dir / f"round_{round_num:02d}_adapter")
 
-        # ── Train ──
+        # ── Train (continuing from previous round's adapter) ──
         t0 = time.time()
-        loss_log = run_training_round(cfg, args.steps_per_round, adapter_dir, shared_dataset)
+        loss_log = run_training_round(cfg, args.steps_per_round, adapter_dir,
+                                      shared_dataset, prev_adapter_dir)
         elapsed = time.time() - t0
 
         if not loss_log:
@@ -705,6 +722,7 @@ def main():
 
         cfg = new_cfg
         cfg["max_steps"] = args.steps_per_round
+        prev_adapter_dir = adapter_dir  # next round continues from this adapter
 
     # ── Summary ──
     print(f"\n{'='*60}")
