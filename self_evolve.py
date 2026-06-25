@@ -516,29 +516,26 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
     )
     tokenizer.padding_side = "right"
 
-    # If a previous adapter exists, merge it into the base weights so this
-    # round continues training from the end of the last round.
     if prev_adapter_dir and os.path.isdir(prev_adapter_dir):
-        print(f"  Merging previous adapter: {prev_adapter_dir}")
+        # Continue training the previous round's adapter directly.
+        # is_trainable=True resumes the existing LoRA weights rather than
+        # creating new ones — avoids any merge/dtype issues with 4-bit models.
+        print(f"  Resuming adapter from: {prev_adapter_dir}")
         from peft import PeftModel
-        model = PeftModel.from_pretrained(model, prev_adapter_dir)
-        model = model.merge_and_unload()
-        # merge_and_unload dequantizes to float32 — cast back to bfloat16
-        # so Unsloth's LoRA kernels don't hit a dtype mismatch on backward
-        model = model.to(torch.bfloat16)
-        print("  Previous adapter merged. Attaching fresh LoRA for this round...")
-
-    # LoRA
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=cfg["r"],
-        target_modules=cfg["target_modules"],
-        lora_alpha=cfg["lora_alpha"],
-        lora_dropout=cfg.get("lora_dropout", 0),
-        bias="none",
-        use_gradient_checkpointing="unsloth",
-        random_state=cfg.get("seed", 3407),
-    )
+        model = PeftModel.from_pretrained(model, prev_adapter_dir, is_trainable=True)
+        print(f"  Adapter loaded as trainable — continuing from last round.")
+    else:
+        # Round 1: attach fresh LoRA to the base model
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=cfg["r"],
+            target_modules=cfg["target_modules"],
+            lora_alpha=cfg["lora_alpha"],
+            lora_dropout=cfg.get("lora_dropout", 0),
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=cfg.get("seed", 3407),
+        )
 
     # Loss callback
     loss_log = []
