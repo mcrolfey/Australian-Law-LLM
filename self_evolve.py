@@ -516,26 +516,39 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
     )
     tokenizer.padding_side = "right"
 
+    # Always attach fresh LoRA via get_peft_model so Unsloth's kernels are applied.
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=cfg["r"],
+        target_modules=cfg["target_modules"],
+        lora_alpha=cfg["lora_alpha"],
+        lora_dropout=cfg.get("lora_dropout", 0),
+        bias="none",
+        use_gradient_checkpointing="unsloth",
+        random_state=cfg.get("seed", 3407),
+    )
+
     if prev_adapter_dir and os.path.isdir(prev_adapter_dir):
-        # Continue training the previous round's adapter directly.
-        # is_trainable=True resumes the existing LoRA weights rather than
-        # creating new ones — avoids any merge/dtype issues with 4-bit models.
-        print(f"  Resuming adapter from: {prev_adapter_dir}")
-        from peft import PeftModel
-        model = PeftModel.from_pretrained(model, prev_adapter_dir, is_trainable=True)
-        print(f"  Adapter loaded as trainable — continuing from last round.")
-    else:
-        # Round 1: attach fresh LoRA to the base model
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r=cfg["r"],
-            target_modules=cfg["target_modules"],
-            lora_alpha=cfg["lora_alpha"],
-            lora_dropout=cfg.get("lora_dropout", 0),
-            bias="none",
-            use_gradient_checkpointing="unsloth",
-            random_state=cfg.get("seed", 3407),
-        )
+        # Copy previous round's adapter weights into the fresh LoRA.
+        # This gives cumulative learning without touching the base model weights
+        # or creating a nested PeftModel — Unsloth kernels remain intact.
+        print(f"  Seeding LoRA weights from: {prev_adapter_dir}")
+        import glob as _glob
+        from peft import set_peft_model_state_dict
+        weight_files = _glob.glob(os.path.join(prev_adapter_dir, "*.safetensors"))
+        if weight_files:
+            from safetensors.torch import load_file as _load_safetensors
+            prev_weights = {}
+            for wf in weight_files:
+                prev_weights.update(_load_safetensors(wf, device="cpu"))
+        else:
+            prev_weights = torch.load(
+                os.path.join(prev_adapter_dir, "adapter_model.bin"),
+                map_location="cpu",
+            )
+        set_peft_model_state_dict(model, prev_weights)
+        del prev_weights
+        print("  LoRA weights seeded from previous round.")
 
     # Loss callback
     loss_log = []
@@ -723,6 +736,14 @@ def main():
         cfg = new_cfg
         cfg["max_steps"] = args.steps_per_round
         prev_adapter_dir = adapter_dir  # next round continues from this adapter
+
+        # Clear dynamo recompilation cache between rounds to prevent progressive slowdown
+        try:
+            torch._dynamo.reset()
+        except Exception:
+            pass
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # ── Summary ──
     print(f"\n{'='*60}")
