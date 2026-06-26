@@ -80,6 +80,13 @@ def parse_args():
                    help="Directory for adapter checkpoints and logs (default: self_evolve_output)")
     p.add_argument("--list-configs", action="store_true",
                    help="Print available GPU configs and exit")
+    # Internal flag: run only the benchmark evaluation then exit.
+    # Called via subprocess so evaluation runs in an isolated CUDA process,
+    # preventing inference kernel state from slowing down subsequent training.
+    p.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--eval-adapter", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--eval-round", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--eval-cfg-json", default=None, help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -487,6 +494,46 @@ def evaluate_round(cfg: dict, adapter_dir: str, output_dir: Path,
     return results
 
 
+def evaluate_round_subprocess(cfg: dict, adapter_dir: str, output_dir: Path,
+                              round_num: int) -> list[dict]:
+    """
+    Run benchmark evaluation in a fresh subprocess so the CUDA context used for
+    inference is completely isolated from the training process.  Without this,
+    Unsloth's inference-mode kernel compilations fragment VRAM and make the next
+    training round 3–4x slower.
+    """
+    import subprocess
+    import tempfile
+
+    # Write cfg to a temp file so the subprocess can read it
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                     delete=False, encoding="utf-8") as f:
+        json.dump(cfg, f)
+        cfg_path = f.name
+
+    json_out = output_dir / f"round_{round_num:02d}_answers.json"
+
+    cmd = [
+        sys.executable, __file__,
+        "--eval-only",
+        "--eval-adapter", adapter_dir,
+        "--eval-round",   str(round_num),
+        "--eval-cfg-json", cfg_path,
+        "--output-dir",   str(output_dir),
+    ]
+    print(f"\n  Running benchmark evaluation in subprocess ({len(QUESTIONS)} questions)...")
+    result = subprocess.run(cmd, check=False)
+    os.unlink(cfg_path)
+
+    if result.returncode != 0:
+        print(f"  WARNING: evaluation subprocess exited with code {result.returncode}")
+
+    if json_out.exists():
+        with open(json_out, encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────────────────────────────────────
@@ -612,6 +659,14 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
 def main():
     args = parse_args()
 
+    # ── Eval-only mode: called as a subprocess by evaluate_round_subprocess() ──
+    if args.eval_only:
+        with open(args.eval_cfg_json, encoding="utf-8") as f:
+            cfg = json.load(f)
+        evaluate_round(cfg, args.eval_adapter,
+                       Path(args.output_dir), args.eval_round)
+        sys.exit(0)
+
     if args.list_configs:
         for key in GPU_CONFIGS:
             print(f"  --gpu {key}")
@@ -686,8 +741,8 @@ def main():
         print(f"\n  Round {round_num} complete in {elapsed/60:.1f} min  "
               f"| loss: {start_loss:.4f} → {end_loss:.4f}")
 
-        # ── Evaluate all 100 questions ──
-        eval_results = evaluate_round(cfg, adapter_dir, output_dir, round_num)
+        # ── Evaluate all 100 questions (isolated subprocess keeps CUDA clean) ──
+        eval_results = evaluate_round_subprocess(cfg, adapter_dir, output_dir, round_num)
         # Send every 5th answer (20 total) — representative coverage across all
         # legal areas without blowing the LM Studio context window.
         # Each answer capped at 600 chars so multi-line answers don't overflow.
