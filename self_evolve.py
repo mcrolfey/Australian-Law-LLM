@@ -83,10 +83,17 @@ def parse_args():
     # Internal flag: run only the benchmark evaluation then exit.
     # Called via subprocess so evaluation runs in an isolated CUDA process,
     # preventing inference kernel state from slowing down subsequent training.
+    # Internal subprocess flags — hidden from help output
     p.add_argument("--eval-only", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--eval-adapter", default=None, help=argparse.SUPPRESS)
     p.add_argument("--eval-round", type=int, default=0, help=argparse.SUPPRESS)
     p.add_argument("--eval-cfg-json", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--train-only", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--train-adapter-out", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--train-prev-adapter", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--train-steps", type=int, default=200, help=argparse.SUPPRESS)
+    p.add_argument("--train-cfg-json", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--train-loss-json", default=None, help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -305,6 +312,18 @@ def load_and_map_dataset(tokenizer, trunc_len: int):
     dataset = dataset.map(formatting_prompts_func, batched=True)
     print(f"  Dataset ready: {len(dataset)} documents\n")
     return dataset
+
+
+def load_and_map_dataset_for_training(cfg: dict):
+    """Load model tokenizer then call load_and_map_dataset. Used in --train-only subprocess."""
+    from unsloth import FastLanguageModel
+    _, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=cfg["model_name"],
+        max_seq_length=cfg["max_seq_length"],
+        dtype=cfg["dtype"],
+        load_in_4bit=cfg["load_in_4bit"],
+    )
+    return load_and_map_dataset(tokenizer, cfg.get("token_truncation_length", 500))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -534,6 +553,50 @@ def evaluate_round_subprocess(cfg: dict, adapter_dir: str, output_dir: Path,
     return []
 
 
+def run_training_round_subprocess(cfg: dict, steps: int, adapter_dir: str,
+                                  prev_adapter_dir: str,
+                                  output_dir: Path) -> list[dict]:
+    """
+    Run one training round in a fresh subprocess so each round starts with a
+    completely clean Python heap and CUDA context.  Without this, memory
+    fragmentation from model load/free cycles causes each training round to be
+    progressively slower (observed: R1=4s/it → R8=160s/it in same process).
+    """
+    import subprocess, tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json",
+                                     delete=False, encoding="utf-8") as f:
+        json.dump(cfg, f)
+        cfg_path = f.name
+
+    loss_json = str(output_dir / f"_loss_tmp_{os.getpid()}.json")
+
+    cmd = [
+        sys.executable, __file__,
+        "--train-only",
+        "--train-cfg-json",    cfg_path,
+        "--train-adapter-out", adapter_dir,
+        "--train-steps",       str(steps),
+        "--train-loss-json",   loss_json,
+        "--output-dir",        str(output_dir),
+    ]
+    if prev_adapter_dir:
+        cmd += ["--train-prev-adapter", prev_adapter_dir]
+
+    result = subprocess.run(cmd, check=False)
+    os.unlink(cfg_path)
+
+    if result.returncode != 0:
+        print(f"  WARNING: training subprocess exited with code {result.returncode}")
+
+    if os.path.exists(loss_json):
+        with open(loss_json, encoding="utf-8") as f:
+            loss_log = json.load(f)
+        os.unlink(loss_json)
+        return loss_log
+    return []
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Training
 # ──────────────────────────────────────────────────────────────────────────────
@@ -667,6 +730,17 @@ def main():
                        Path(args.output_dir), args.eval_round)
         sys.exit(0)
 
+    # ── Train-only mode: called as a subprocess by run_training_round_subprocess() ──
+    if args.train_only:
+        with open(args.train_cfg_json, encoding="utf-8") as f:
+            cfg = json.load(f)
+        dataset = load_and_map_dataset_for_training(cfg)
+        loss_log = run_training_round(cfg, args.train_steps, args.train_adapter_out,
+                                      dataset, args.train_prev_adapter)
+        with open(args.train_loss_json, "w", encoding="utf-8") as f:
+            json.dump(loss_log, f)
+        sys.exit(0)
+
     if args.list_configs:
         for key in GPU_CONFIGS:
             print(f"  --gpu {key}")
@@ -696,21 +770,6 @@ def main():
     cfg = load_base_config(args.gpu)
     cfg["max_steps"] = args.steps_per_round
 
-    # Load and map dataset ONCE — shared across all rounds, no remapping
-    from unsloth import FastLanguageModel
-    _init_model, _init_tokenizer = FastLanguageModel.from_pretrained(
-        model_name=cfg["model_name"],
-        max_seq_length=cfg["max_seq_length"],
-        dtype=cfg["dtype"],
-        load_in_4bit=cfg["load_in_4bit"],
-    )
-    shared_dataset = load_and_map_dataset(
-        _init_tokenizer, cfg.get("token_truncation_length", 500)
-    )
-    del _init_model, _init_tokenizer
-    gc.collect()
-    torch.cuda.empty_cache()
-
     history = []
     prev_adapter_dir = None  # updated each round so the next round continues from here
 
@@ -726,10 +785,10 @@ def main():
 
         adapter_dir = str(output_dir / f"round_{round_num:02d}_adapter")
 
-        # ── Train (continuing from previous round's adapter) ──
+        # ── Train in isolated subprocess — fresh Python heap + CUDA context each round ──
         t0 = time.time()
-        loss_log = run_training_round(cfg, args.steps_per_round, adapter_dir,
-                                      shared_dataset, prev_adapter_dir)
+        loss_log = run_training_round_subprocess(cfg, args.steps_per_round, adapter_dir,
+                                                 prev_adapter_dir, output_dir)
         elapsed = time.time() - t0
 
         if not loss_log:
@@ -791,14 +850,6 @@ def main():
         cfg = new_cfg
         cfg["max_steps"] = args.steps_per_round
         prev_adapter_dir = adapter_dir  # next round continues from this adapter
-
-        # Clear dynamo recompilation cache between rounds to prevent progressive slowdown
-        try:
-            torch._dynamo.reset()
-        except Exception:
-            pass
-        gc.collect()
-        torch.cuda.empty_cache()
 
     # ── Summary ──
     print(f"\n{'='*60}")
