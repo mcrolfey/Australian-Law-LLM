@@ -261,17 +261,63 @@ def main():
     )
 
     # --------------------------------------------------
-    # 3. Load Open Australian Legal Corpus
+    # 3. Load dataset
     # --------------------------------------------------
-    print("Downloading Open Australian Legal Corpus via kagglehub...")
-    import kagglehub
-    dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
-    corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
-    print(f"Dataset path: {corpus_path}")
+    # Prefer a generated Q&A dataset (qa_dataset.jsonl) over the raw corpus.
+    # Q&A format aligns training with the benchmark test format — the model
+    # learns to answer questions rather than complete documents.
+    # Generate qa_dataset.jsonl first with: python generate_qa.py
+    QA_DATASET = "qa_dataset.jsonl"
+    KAGGLE_CACHE = os.path.expanduser(
+        "~/.cache/kagglehub/datasets/umarbutler/open-australian-legal-corpus/versions/2/corpus.jsonl"
+    )
 
-    dataset = load_dataset("json", data_files=corpus_path, split="train")
+    EOS_TOKEN = tokenizer.eos_token
 
-    alpaca_prompt = """\
+    if os.path.exists(QA_DATASET):
+        print(f"Loading Q&A dataset: {QA_DATASET}")
+        dataset = load_dataset("json", data_files=QA_DATASET, split="train")
+        print(f"  {len(dataset):,} Q&A pairs loaded")
+
+        qa_prompt = """\
+Below is a question about Australian law. Write a response that accurately and concisely answers it.
+
+### Instruction:
+You are an expert Australian legal assistant trained on the Open Australian Legal Corpus. \
+Answer the following question accurately, citing relevant legislation or case law where appropriate.
+
+### Input:
+{question}
+
+### Response:
+{answer}"""
+
+        def format_qa(examples):
+            return {"text": [
+                qa_prompt.format(question=q, answer=a) + EOS_TOKEN
+                for q, a in zip(examples["question"], examples["answer"])
+            ]}
+
+        print("Formatting Q&A dataset...")
+        dataset = dataset.map(format_qa, batched=True)
+
+    else:
+        # Fall back to raw corpus (document completion) if Q&A dataset not yet generated.
+        # Run: python generate_qa.py   to create qa_dataset.jsonl first.
+        print(f"NOTE: {QA_DATASET} not found — falling back to raw corpus (document completion).")
+        print("      Run 'python generate_qa.py' to generate a Q&A dataset for better results.\n")
+
+        if os.path.exists(KAGGLE_CACHE):
+            corpus_path = KAGGLE_CACHE
+            print(f"  Using cached corpus: {corpus_path}")
+        else:
+            import kagglehub
+            dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
+            corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
+
+        dataset = load_dataset("json", data_files=corpus_path, split="train")
+
+        alpaca_prompt = """\
 Below is an instruction that describes a legal task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
@@ -285,24 +331,22 @@ Document Type: {}
 ### Response:
 {}"""
 
-    EOS_TOKEN = tokenizer.eos_token
-    trunc_len = cfg["token_truncation_length"]
+        trunc_len = cfg["token_truncation_length"]
 
-    def formatting_prompts_func(examples):
-        citations     = examples.get("citation",     ["Unknown Citation"]     * len(examples["text"]))
-        jurisdictions = examples.get("jurisdiction", ["Unknown Jurisdiction"] * len(examples["text"]))
-        types         = examples.get("type",         ["Unknown Type"]         * len(examples["text"]))
-        texts         = examples["text"]
+        def formatting_prompts_func(examples):
+            citations     = examples.get("citation",     ["Unknown Citation"]     * len(examples["text"]))
+            jurisdictions = examples.get("jurisdiction", ["Unknown Jurisdiction"] * len(examples["text"]))
+            types         = examples.get("type",         ["Unknown Type"]         * len(examples["text"]))
+            texts         = examples["text"]
+            formatted = []
+            for citation, jurisdiction, doc_type, text in zip(citations, jurisdictions, types, texts):
+                raw = alpaca_prompt.format(citation, jurisdiction, doc_type, text or "") + EOS_TOKEN
+                tokens = tokenizer.encode(raw, truncation=True, max_length=trunc_len)
+                formatted.append(tokenizer.decode(tokens, skip_special_tokens=False))
+            return {"text": formatted}
 
-        formatted = []
-        for citation, jurisdiction, doc_type, text in zip(citations, jurisdictions, types, texts):
-            raw = alpaca_prompt.format(citation, jurisdiction, doc_type, text or "") + EOS_TOKEN
-            tokens = tokenizer.encode(raw, truncation=True, max_length=trunc_len)
-            formatted.append(tokenizer.decode(tokens, skip_special_tokens=False))
-        return {"text": formatted}
-
-    print("Formatting dataset...")
-    dataset = dataset.map(formatting_prompts_func, batched=True)
+        print("Formatting dataset...")
+        dataset = dataset.map(formatting_prompts_func, batched=True)
 
     # --------------------------------------------------
     # 4. Trainer

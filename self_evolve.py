@@ -256,8 +256,26 @@ def extract_json(text: str) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dataset — loaded once, reused across all rounds
+# Dataset
 # ──────────────────────────────────────────────────────────────────────────────
+QA_DATASET   = "qa_dataset.jsonl"
+KAGGLE_CACHE = os.path.expanduser(
+    "~/.cache/kagglehub/datasets/umarbutler/open-australian-legal-corpus/versions/2/corpus.jsonl"
+)
+
+QA_PROMPT = """\
+Below is a question about Australian law. Write a response that accurately and concisely answers it.
+
+### Instruction:
+You are an expert Australian legal assistant trained on the Open Australian Legal Corpus. \
+Answer the following question accurately, citing relevant legislation or case law where appropriate.
+
+### Input:
+{question}
+
+### Response:
+{answer}"""
+
 ALPACA_PROMPT = """\
 Below is an instruction that describes a legal task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
@@ -273,18 +291,32 @@ Document Type: {}
 {}"""
 
 
-KAGGLE_CACHE = os.path.expanduser(
-    "~/.cache/kagglehub/datasets/umarbutler/open-australian-legal-corpus/versions/2/corpus.jsonl"
-)
-
-
 def load_and_map_dataset(tokenizer, trunc_len: int):
-    """Download (or use cache) and map the corpus. Called once before the loop."""
+    """Load Q&A dataset if available, otherwise fall back to raw corpus."""
     from datasets import load_dataset
 
-    print("Loading Open Australian Legal Corpus (once — reused every round)...")
+    EOS_TOKEN = tokenizer.eos_token
 
-    # Use local cache if available — avoids Kaggle DNS failures when offline
+    if os.path.exists(QA_DATASET):
+        print(f"Loading Q&A dataset: {QA_DATASET}")
+        dataset = load_dataset("json", data_files=QA_DATASET, split="train")
+        print(f"  {len(dataset):,} Q&A pairs loaded")
+
+        def format_qa(examples):
+            return {"text": [
+                QA_PROMPT.format(question=q, answer=a) + EOS_TOKEN
+                for q, a in zip(examples["question"], examples["answer"])
+            ]}
+
+        print("Formatting Q&A dataset...")
+        dataset = dataset.map(format_qa, batched=True)
+        print(f"  Dataset ready: {len(dataset):,} examples\n")
+        return dataset
+
+    # Fallback: raw corpus (document completion)
+    print("NOTE: qa_dataset.jsonl not found — using raw corpus (document completion).")
+    print("      Run 'python generate_qa.py' to generate a Q&A dataset for better results.\n")
+
     if os.path.exists(KAGGLE_CACHE):
         corpus_path = KAGGLE_CACHE
         print(f"  Using cached corpus: {corpus_path}")
@@ -292,9 +324,8 @@ def load_and_map_dataset(tokenizer, trunc_len: int):
         import kagglehub
         dataset_dir = kagglehub.dataset_download("umarbutler/open-australian-legal-corpus")
         corpus_path = os.path.join(dataset_dir, "corpus.jsonl")
-    dataset = load_dataset("json", data_files=corpus_path, split="train")
 
-    EOS_TOKEN = tokenizer.eos_token
+    dataset = load_dataset("json", data_files=corpus_path, split="train")
 
     def formatting_prompts_func(examples):
         citations     = examples.get("citation",     ["Unknown"] * len(examples["text"]))
@@ -310,7 +341,7 @@ def load_and_map_dataset(tokenizer, trunc_len: int):
 
     print("Mapping dataset (this runs once)...")
     dataset = dataset.map(formatting_prompts_func, batched=True)
-    print(f"  Dataset ready: {len(dataset)} documents\n")
+    print(f"  Dataset ready: {len(dataset):,} documents\n")
     return dataset
 
 
