@@ -8,7 +8,8 @@ The corpus covers 202,000+ documents — legislation, case law, and legal instru
 
 ## Features
 
-- **Two-step training pipeline** — Continued Pre-Training (CPT) followed by instruction SFT reduces hallucination by grounding the model in actual legal text before teaching it to answer questions
+- **Three-step training pipeline** — Q&A generation → SFT → self-evolution produces a model that actually answers legal questions rather than completing documents
+- **Congruent training and evaluation** — the model trains on Q&A pairs in the same format as the benchmark questions, so evaluation scores reflect real learning progress
 - **4-bit quantised training** — runs on consumer GPUs from 4 GB VRAM upward
 - **GPU tier configs** — one flag selects the right model size and batch settings for your hardware
 - **LoRA fine-tuning via Unsloth** — 2–5× faster than vanilla HuggingFace with lower memory usage
@@ -120,7 +121,14 @@ The full pipeline has three stages. Each stage builds on the last.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 1 — CPT (cpt_train.py)                                       │
+│  Stage 0 — Q&A Generation (generate_qa.py)                          │
+│  Sample corpus documents → LM Studio generates question/answer pairs │
+│  Output: qa_dataset.jsonl  (~15k pairs from 5k documents)           │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  Stage 1 — CPT (cpt_train.py)   [optional but recommended]          │
 │  Feed raw Acts and judgments. Model learns what the law says.        │
 │  Output: lora_cpt_law_model/                                         │
 └────────────────────────────┬────────────────────────────────────────┘
@@ -128,7 +136,7 @@ The full pipeline has three stages. Each stage builds on the last.
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  Stage 2 — SFT (train.py)                                           │
-│  Teach the model to answer questions in Alpaca format.               │
+│  Train on Q&A pairs — same format as benchmark evaluation.           │
 │  Optionally starts from CPT weights (--cpt-model flag).              │
 │  Output: lora_australian_law_model/                                  │
 └────────────────────────────┬────────────────────────────────────────┘
@@ -143,11 +151,71 @@ The full pipeline has three stages. Each stage builds on the last.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-You can run any stage independently. Running all three gives the best results: CPT grounds the model in real legal text, SFT teaches it to answer questions, and self-evolution iteratively improves the hyperparameters using a local LLM as the judge.
+You can run any stage independently, but Stage 0 (Q&A generation) should come first — without it, Stages 2 and 3 train on raw document completion which does not align with the Q&A benchmark format.
 
-### Why three stages?
+### Why this order?
 
-Training directly on Q&A pairs (SFT alone) causes hallucination — the model has no knowledge of specific Acts, sections, or cases, so it generates confident-sounding but incorrect answers. CPT fixes the factual gap. Self-evolution then continuously improves training quality by observing the model's actual answers across 100 benchmark questions, not just the loss curve.
+**The core problem with skipping Stage 0:** training on raw legal documents teaches the model to *complete documents*, but the benchmark tests whether it can *answer questions*. These are different tasks — a model trained without Q&A pairs will produce plausible-sounding text rather than direct answers, and evaluation scores will not reflect actual legal understanding.
+
+**Why CPT (Stage 1) before SFT (Stage 2):** training directly on Q&A pairs with no prior legal knowledge causes hallucination — the model invents case names and section numbers it has never seen. CPT injects factual knowledge first, reducing this problem significantly.
+
+**Why self-evolution (Stage 3) last:** it observes the model's actual answers to 100 benchmark questions — not just the loss curve — and uses a local LLM to reason about what hyperparameter changes would improve them. Running it before SFT would mean evaluating a model that hasn't learned the Q&A format yet.
+
+---
+
+### Stage 0: Q&A Dataset Generation
+
+Before training, generate a question/answer dataset from the corpus using LM Studio. This is the critical step that aligns training format with evaluation format.
+
+**Why this matters:** `train.py` and `self_evolve.py` automatically use `qa_dataset.jsonl` when it exists. Without it they fall back to raw document completion, which trains a different skill to what the benchmark tests.
+
+```bash
+# Generate ~15,000 Q&A pairs from 5,000 sampled documents (recommended)
+python generate_qa.py --count 5000 --pairs-per-doc 3
+
+# Smaller test run to check LM Studio is working
+python generate_qa.py --count 100 --pairs-per-doc 2
+
+# Resume a run that was interrupted
+python generate_qa.py --count 5000 --pairs-per-doc 3 --resume
+
+# Larger dataset for better coverage
+python generate_qa.py --count 20000 --pairs-per-doc 3
+```
+
+**Prerequisites:** LM Studio must be running with a model loaded before running this script.
+
+**How it works:**
+
+1. Loads the corpus from the local Kaggle cache
+2. Randomly samples `--count` documents (default 5,000)
+3. Sends each document (truncated to 800 words) to LM Studio with a prompt requesting `--pairs-per-doc` Q&A pairs as a JSON array
+4. Parses the JSON response and writes valid pairs to `qa_dataset.jsonl`
+5. Saves incrementally — if interrupted, re-run with `--resume` to continue from where it left off
+
+**Output format** (`qa_dataset.jsonl`):
+
+```json
+{"question": "What is the penalty for insider trading under the Corporations Act 2001?", "answer": "Section 1043A prohibits insider trading...", "source": "Corporations Act 2001 (Cth)", "jurisdiction": "Commonwealth", "type": "act"}
+{"question": "When does a duty of care arise in negligence?", "answer": "A duty of care arises where...", "source": "Donoghue v Stevenson [1932] AC 562", "jurisdiction": "Commonwealth", "type": "decision"}
+```
+
+**All options:**
+
+```
+--count N           Number of corpus documents to sample (default: 5000)
+--pairs-per-doc N   Q&A pairs to generate per document (default: 3)
+--max-doc-tokens N  Max words per document sent to LM Studio (default: 800)
+--output FILE       Output JSONL file (default: qa_dataset.jsonl)
+--lm-studio-url URL LM Studio base URL (default: http://localhost:1234)
+--seed N            Random seed for document sampling (default: 42)
+--resume            Skip already-generated pairs and continue
+--corpus PATH       Path to corpus.jsonl (auto-detected if omitted)
+```
+
+**Estimated time:** ~2 minutes per 100 documents at 3 pairs each, depending on LM Studio model speed. 5,000 documents takes roughly 1–2 hours.
+
+Once `qa_dataset.jsonl` exists in the project folder, `train.py` and `self_evolve.py` will use it automatically on the next run.
 
 ---
 
@@ -517,21 +585,23 @@ The prompt template uses hard constraints instructing the model not to use param
 
 ```
 Australian-Law-LLM/
-├── cpt_train.py               # Step 1: CPT on raw legal text
-├── train.py                   # Step 2: SFT instruction fine-tuning
+├── generate_qa.py             # Stage 0: generate Q&A pairs from corpus via LM Studio
+├── cpt_train.py               # Stage 1: CPT on raw legal text
+├── train.py                   # Stage 2: SFT on Q&A pairs (uses qa_dataset.jsonl if present)
+├── self_evolve.py             # Stage 3: recursive self-evolution loop via LM Studio
 ├── colab_train.ipynb          # Colab notebook — train 8B on a free T4 GPU
 ├── serve.py                   # Gradio localhost chat UI
 ├── batch_test.py              # Batch eval: 100 questions, fine-tuned vs base
 ├── rag_eval.py                # RAG open-book eval: context-grounded answers
 ├── test_data.json             # 30 question/context pairs for rag_eval.py
-├── self_evolve.py             # Recursive self-evolution loop via LM Studio
 ├── test_model.py              # Interactive single-question CLI
 ├── requirements.txt
 ├── configs/
-│   ├── gpu_4gb.py             # SFT settings for 4 GB VRAM
-│   ├── gpu_8gb.py             # SFT settings for 8 GB VRAM
-│   ├── gpu_16gb.py            # SFT settings for 16 GB VRAM
-│   └── gpu_24gb.py            # SFT settings for 24 GB VRAM
+│   ├── gpu_4gb.py             # Training settings for 4 GB VRAM
+│   ├── gpu_8gb.py             # Training settings for 8 GB VRAM
+│   ├── gpu_16gb.py            # Training settings for 16 GB VRAM
+│   └── gpu_24gb.py            # Training settings for 24 GB VRAM
+├── qa_dataset.jsonl           # Generated Q&A pairs — created by generate_qa.py (gitignored)
 ├── lora_cpt_law_model/        # CPT output — created by cpt_train.py (gitignored)
 └── lora_australian_law_model/ # SFT output — created by train.py (gitignored)
 ```
