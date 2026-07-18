@@ -18,6 +18,9 @@ CONFIG = {
     "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
                        "gate_proj", "up_proj", "down_proj"],
 
+    # Trajectory regularisation (geometric penalty on layer-to-layer hidden state displacement)
+    "trajectory_alpha": 0.01,
+
     # Training
     "per_device_train_batch_size": 1,
     "gradient_accumulation_steps": 8,

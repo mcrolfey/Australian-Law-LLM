@@ -18,9 +18,13 @@ CONFIG = {
     "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
                        "gate_proj", "up_proj", "down_proj"],
 
-    # Training
-    "per_device_train_batch_size": 2,
-    "gradient_accumulation_steps": 4,
+    # Trajectory regularisation (geometric penalty on layer-to-layer hidden state displacement)
+    "trajectory_alpha": 0.01,
+
+    # Training — batch halved from 2→1, grad_accum doubled from 4→8 to keep the same
+    # effective batch size (8) while reducing peak VRAM from output_hidden_states=True.
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
     "warmup_steps": 50,
     "max_steps": 1000,
     "learning_rate": 5e-5,

@@ -50,6 +50,7 @@ BOUNDS = {
     "weight_decay":                   (0.0, 0.3),
     "r":                              (4, 64),
     "lora_alpha":                     (4, 128),
+    "trajectory_alpha":               (0.0, 0.1),
 }
 
 TUNABLE_KEYS = set(BOUNDS.keys())
@@ -641,8 +642,8 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
     Returns the loss log as a list of {"step": int, "loss": float} dicts.
     """
     from unsloth import FastLanguageModel
-    from trl import SFTTrainer
     from transformers import TrainingArguments
+    from trajectory_trainer import TrajectoryTrainer
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -701,7 +702,8 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
             if logs and "loss" in logs:
                 loss_log.append({"step": state.global_step, "loss": logs["loss"]})
 
-    trainer = SFTTrainer(
+    trainer = TrajectoryTrainer(
+        trajectory_alpha=cfg.get("trajectory_alpha", 0.01),
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset,   # pre-mapped — no remapping here
@@ -723,6 +725,7 @@ def run_training_round(cfg: dict, steps: int, adapter_dir: str, dataset,
             lr_scheduler_type=cfg.get("lr_scheduler_type", "cosine"),
             seed=cfg.get("seed", 3407),
             output_dir=cfg.get("output_dir", "unsloth_australian_legal_lora"),
+            gradient_checkpointing=True,
             save_strategy="no",
             disable_tqdm=False,
         ),

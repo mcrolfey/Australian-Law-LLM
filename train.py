@@ -83,6 +83,14 @@ def parse_args():
         action="store_true",
         help="Print available GPU configs and exit",
     )
+    parser.add_argument(
+        "--trajectory-alpha",
+        type=float,
+        default=None,
+        help="Trajectory regularisation strength (default: from GPU config, usually 0.01). "
+             "Set to 0.0 to disable. Higher values enforce smoother layer transitions "
+             "at the cost of slower convergence.",
+    )
     return parser.parse_args()
 
 
@@ -182,6 +190,8 @@ def main():
     cfg = load_config(args.gpu)
     if args.steps is not None:
         cfg["max_steps"] = args.steps
+    if args.trajectory_alpha is not None:
+        cfg["trajectory_alpha"] = args.trajectory_alpha
 
     print(f"\n{'='*56}")
     print(f"  Australian Law LLM Fine-Tuning")
@@ -201,8 +211,8 @@ def main():
     # 1. Load Model
     # --------------------------------------------------
     from datasets import load_dataset
-    from trl import SFTTrainer
     from transformers import TrainingArguments
+    from trajectory_trainer import TrajectoryTrainer
 
     # --------------------------------------------------
     # 1a. Determine base model — either raw HF model or CPT-adapted weights
@@ -351,7 +361,12 @@ Document Type: {}
     # --------------------------------------------------
     # 4. Trainer
     # --------------------------------------------------
-    trainer = SFTTrainer(
+    trajectory_alpha = cfg.get("trajectory_alpha", 0.01)
+    print(f"  Trajectory regularisation: alpha={trajectory_alpha}"
+          f"{'  (disabled)' if trajectory_alpha == 0.0 else ''}")
+
+    trainer = TrajectoryTrainer(
+        trajectory_alpha=trajectory_alpha,
         model=model,
         tokenizer=tokenizer,
         train_dataset=dataset,
@@ -373,6 +388,9 @@ Document Type: {}
             lr_scheduler_type=cfg["lr_scheduler_type"],
             seed=cfg["seed"],
             output_dir=cfg["output_dir"],
+            # gradient_checkpointing trades recomputation for VRAM — important
+            # when output_hidden_states=True retains all intermediate activations.
+            gradient_checkpointing=True,
             # Windows pickle bug: torch.save(SFTConfig) fails mid-training.
             # Intermediate checkpoints are disabled; adapters save at the end.
             save_strategy="no",
