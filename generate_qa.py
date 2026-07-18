@@ -139,34 +139,24 @@ def _extract_from_400_body(err) -> str | None:
 
 
 def call_lm_studio(client, model: str, prompt: str, retries: int = 3) -> str | None:
-    messages = [
-        # Explicit system message to suppress chain-of-thought / thinking tokens.
-        # Gemma 4 26B is a thinking model; without this it wraps output in
-        # <|channel>thought\n...\n blocks that LM Studio cannot parse (400 error).
-        {"role": "system", "content": (
-            "You are a JSON output generator. "
-            "Output ONLY valid JSON — no thinking, no explanations, no markdown fences."
-        )},
-        {"role": "user", "content": prompt},
-    ]
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=messages,
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.4,
-                max_tokens=1024,
+                max_tokens=2048,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
             status = getattr(e, "status_code", None)
             if status == 400:
-                # Gemma thinking model: LM Studio returns 400 but the error body
-                # contains the full output — try to salvage it.
+                # Gemma 4 is a thinking model — LM Studio returns 400 when the
+                # output contains <|channel>thought\n...> reasoning blocks, but
+                # the error body contains the full output including the Q&A pairs.
                 extracted = _extract_from_400_body(e)
                 if extracted:
                     return extracted
-                # If we can't extract, fall through to retry logic below.
             wait = 2 ** attempt
             print(f"    LM Studio error (attempt {attempt+1}/{retries}): {e} — retrying in {wait}s")
             time.sleep(wait)
@@ -221,13 +211,26 @@ def parse_qa_response(response: str) -> list[dict]:
     if pairs:
         return pairs
 
-    # Strategy 3: model used "Q:" / "A:" plain-text format instead of JSON
-    qa_blocks = re.findall(
-        r"[Qq](?:uestion)?[:\.\)]\s*(.+?)\s*[Aa](?:nswer)?[:\.\)]\s*(.+?)(?=\n[Qq]|$)",
+    # Strategy 3: model used "Q:" / "A:" / "Question:" / "Answer:" plain-text format.
+    # Extract all questions and answers separately, then zip them.
+    # This is more robust than a single combined regex when there are decorators
+    # (bullet points, "Idea N:" headers, etc.) between pairs.
+    questions = re.findall(
+        r"[Qq](?:uestion)?[:\.\)]\s*(.+?)(?=\s*[Aa](?:nswer)?[:\.\)])",
         text, re.DOTALL
     )
-    if qa_blocks:
-        return [{"question": q.strip(), "answer": a.strip()} for q, a in qa_blocks]
+    answers = re.findall(
+        r"[Aa](?:nswer)?[:\.\)]\s*(.+?)(?=\s*[Qq](?:uestion)?[:\.\)]|$)",
+        text, re.DOTALL
+    )
+    if questions and answers:
+        pairs = [
+            {"question": q.strip(), "answer": a.strip()}
+            for q, a in zip(questions, answers)
+            if q.strip() and a.strip()
+        ]
+        if pairs:
+            return pairs
 
     return []
 
