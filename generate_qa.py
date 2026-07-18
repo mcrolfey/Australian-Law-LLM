@@ -116,17 +116,57 @@ def truncate_to_words(text: str, max_words: int) -> str:
     return " ".join(words[:max_words]) + "…"
 
 
+def _extract_from_400_body(err) -> str | None:
+    """
+    Gemma 4 thinking models cause LM Studio to return a 400 error whose body
+    contains the full thinking output (including the Q&A pairs we want).
+    Try to pull that text out so parse_qa_response can still work on it.
+    """
+    try:
+        body = getattr(err, "body", None)
+        if body and isinstance(body, dict):
+            msg = body.get("error", "")
+        else:
+            msg = str(err)
+        # The error message is: "Failed to parse input at pos 0: <thinking content>"
+        marker = "Failed to parse input at pos 0: "
+        idx = msg.find(marker)
+        if idx != -1:
+            return msg[idx + len(marker):]
+        return msg if msg else None
+    except Exception:
+        return None
+
+
 def call_lm_studio(client, model: str, prompt: str, retries: int = 3) -> str | None:
+    messages = [
+        # Explicit system message to suppress chain-of-thought / thinking tokens.
+        # Gemma 4 26B is a thinking model; without this it wraps output in
+        # <|channel>thought\n...\n blocks that LM Studio cannot parse (400 error).
+        {"role": "system", "content": (
+            "You are a JSON output generator. "
+            "Output ONLY valid JSON — no thinking, no explanations, no markdown fences."
+        )},
+        {"role": "user", "content": prompt},
+    ]
     for attempt in range(retries):
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 temperature=0.4,
                 max_tokens=1024,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
+            status = getattr(e, "status_code", None)
+            if status == 400:
+                # Gemma thinking model: LM Studio returns 400 but the error body
+                # contains the full output — try to salvage it.
+                extracted = _extract_from_400_body(e)
+                if extracted:
+                    return extracted
+                # If we can't extract, fall through to retry logic below.
             wait = 2 ** attempt
             print(f"    LM Studio error (attempt {attempt+1}/{retries}): {e} — retrying in {wait}s")
             time.sleep(wait)
