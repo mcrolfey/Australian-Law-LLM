@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 
@@ -71,6 +72,8 @@ def parse_args():
                    help="Skip documents already in the output file and continue")
     p.add_argument("--corpus", default=None,
                    help="Path to corpus.jsonl (auto-detected from Kaggle cache if omitted)")
+    p.add_argument("--debug", action="store_true",
+                   help="Print raw LM Studio response whenever parsing fails")
     return p.parse_args()
 
 
@@ -130,24 +133,63 @@ def call_lm_studio(client, model: str, prompt: str, retries: int = 3) -> str | N
     return None
 
 
+def _valid_pair(p) -> bool:
+    return (
+        isinstance(p, dict)
+        and "question" in p and "answer" in p
+        and isinstance(p["question"], str) and p["question"].strip()
+        and isinstance(p["answer"],   str) and p["answer"].strip()
+    )
+
+
 def parse_qa_response(response: str) -> list[dict]:
-    """Extract the JSON array from the LM Studio response."""
-    # Find the first [ and last ] to isolate the JSON array
-    start = response.find("[")
-    end   = response.rfind("]")
-    if start == -1 or end == -1:
-        return []
-    try:
-        pairs = json.loads(response[start:end+1])
-        return [
-            p for p in pairs
-            if isinstance(p, dict)
-            and "question" in p and "answer" in p
-            and isinstance(p["question"], str) and p["question"].strip()
-            and isinstance(p["answer"],   str) and p["answer"].strip()
-        ]
-    except json.JSONDecodeError:
-        return []
+    """
+    Robustly extract Q&A pairs from an LM Studio response.
+
+    Handles all common Gemma output patterns:
+      • Clean JSON array:           [{"question":...}, ...]
+      • Markdown fenced:            ```json\n[...]\n```
+      • Array inside prose:         "Here are pairs:\n[...]"
+      • Newline-separated objects:  {"question":...}\n{"question":...}
+    """
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    text = re.sub(r"```[a-z]*\n?", "", response).strip()
+    text = re.sub(r"\n?```", "", text).strip()
+
+    # Strategy 1: parse as a JSON array
+    start = text.find("[")
+    end   = text.rfind("]")
+    if start != -1 and end != -1:
+        try:
+            pairs = json.loads(text[start:end+1])
+            if isinstance(pairs, list):
+                valid = [p for p in pairs if _valid_pair(p)]
+                if valid:
+                    return valid
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 2: find all individual JSON objects and collect valid pairs
+    pairs = []
+    for match in re.finditer(r"\{[^{}]+\}", text, re.DOTALL):
+        try:
+            obj = json.loads(match.group())
+            if _valid_pair(obj):
+                pairs.append(obj)
+        except json.JSONDecodeError:
+            pass
+    if pairs:
+        return pairs
+
+    # Strategy 3: model used "Q:" / "A:" plain-text format instead of JSON
+    qa_blocks = re.findall(
+        r"[Qq](?:uestion)?[:\.\)]\s*(.+?)\s*[Aa](?:nswer)?[:\.\)]\s*(.+?)(?=\n[Qq]|$)",
+        text, re.DOTALL
+    )
+    if qa_blocks:
+        return [{"question": q.strip(), "answer": a.strip()} for q, a in qa_blocks]
+
+    return []
 
 
 def count_existing(output_path: str) -> int:
@@ -225,6 +267,8 @@ def main():
                 errors += 1
                 if errors <= 5:
                     print(f"  [doc {i+1}] Failed to parse response — skipping")
+                    if args.debug:
+                        print(f"  RAW RESPONSE:\n{response[:600]}\n  ---")
                 continue
 
             for pair in pairs:
