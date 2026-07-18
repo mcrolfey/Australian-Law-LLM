@@ -8,7 +8,8 @@ The corpus covers 202,000+ documents — legislation, case law, and legal instru
 
 ## Features
 
-- **Three-step training pipeline** — Q&A generation → SFT → self-evolution produces a model that actually answers legal questions rather than completing documents
+- **Four-step training pipeline** — Q&A generation → CPT → SFT with trajectory loss → self-evolution
+- **Trajectory loss regularisation** — geometric penalty on layer-to-layer hidden state displacement reduces hallucination by enforcing smooth internal reasoning paths
 - **Congruent training and evaluation** — the model trains on Q&A pairs in the same format as the benchmark questions, so evaluation scores reflect real learning progress
 - **4-bit quantised training** — runs on consumer GPUs from 4 GB VRAM upward
 - **GPU tier configs** — one flag selects the right model size and batch settings for your hardware
@@ -135,8 +136,8 @@ The full pipeline has three stages. Each stage builds on the last.
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Stage 2 — SFT (train.py)                                           │
-│  Train on Q&A pairs — same format as benchmark evaluation.           │
+│  Stage 2 — SFT with Trajectory Loss (train.py)                      │
+│  Train on Q&A pairs with geometric regularisation on hidden states.  │
 │  Optionally starts from CPT weights (--cpt-model flag).              │
 │  Output: lora_australian_law_model/                                  │
 └────────────────────────────┬────────────────────────────────────────┘
@@ -342,6 +343,55 @@ At the end, the script identifies the round with the lowest final loss and print
 | `weight_decay` | 0.0 — 0.3 |
 | `r` (LoRA rank) | 4 — 64 |
 | `lora_alpha` | 4 — 128 |
+| `trajectory_alpha` | 0.0 — 0.1 |
+
+---
+
+## Trajectory Loss Regularisation
+
+Trajectory loss is a geometric penalty applied on top of the standard next-token prediction loss during SFT and self-evolution. It discourages any single transformer layer from making a disproportionately large representational jump, which correlates with hallucination in domain-specific fine-tuning.
+
+### How it works
+
+A transformer builds its answer by passing a token's representation through N layers. Each layer nudges the hidden state — like steps along a path. If one layer makes a sudden large jump, the model is over-relying on that layer, which tends to produce unstable or fabricated output.
+
+The penalty measures the mean L2 displacement between every pair of consecutive hidden states:
+
+```
+trajectory_loss = mean over all layers of ||h[i+1] − h[i]||₂
+
+total_loss = ntp_loss + trajectory_alpha × trajectory_loss
+```
+
+A small `trajectory_alpha` (default `0.01`) keeps this as a soft nudge — it regularises internal geometry without dominating the training signal. The self-evolution loop can increase or decrease `trajectory_alpha` between rounds as LM Studio observes whether tighter or looser geometry improves answer quality.
+
+### Usage
+
+Trajectory loss is **on by default** in both `train.py` and `self_evolve.py`. No extra steps are needed.
+
+```bash
+# Train with default alpha (0.01)
+python train.py --gpu 8gb
+
+# Increase penalty — enforce smoother layer transitions
+python train.py --gpu 8gb --trajectory-alpha 0.05
+
+# Disable trajectory loss entirely
+python train.py --gpu 8gb --trajectory-alpha 0.0
+```
+
+### VRAM impact
+
+Computing trajectory loss requires retaining all intermediate hidden states during the forward pass (`output_hidden_states=True`). This increases peak VRAM usage. Two mitigations are applied automatically:
+
+1. **`gradient_checkpointing=True`** is set in `TrainingArguments` — PyTorch recomputes activations during the backward pass rather than storing them all, trading speed for memory
+2. **Batch size** is halved (and gradient accumulation doubled) in the 16 GB and 24 GB configs to keep the effective batch size the same while reducing peak allocation
+
+On an 8 GB GPU (batch size already 1), no batch adjustment is needed — gradient checkpointing alone is sufficient.
+
+### Implementation
+
+The custom trainer lives in [`trajectory_trainer.py`](trajectory_trainer.py). It subclasses `SFTTrainer` so all SFT tokenisation, packing, and dataset handling is inherited unchanged — only `compute_loss` is overridden.
 
 ---
 
@@ -502,6 +552,7 @@ LM Studio can only modify parameters within these safe bounds — values outside
 | `weight_decay` | 0.0 – 0.3 |
 | `r` (LoRA rank) | 4 – 64 |
 | `lora_alpha` | 4 – 128 |
+| `trajectory_alpha` | 0.0 – 0.1 |
 
 Model architecture, sequence length, and dataset are not modified — only the optimisation hyperparameters.
 
@@ -587,7 +638,8 @@ The prompt template uses hard constraints instructing the model not to use param
 Australian-Law-LLM/
 ├── generate_qa.py             # Stage 0: generate Q&A pairs from corpus via LM Studio
 ├── cpt_train.py               # Stage 1: CPT on raw legal text
-├── train.py                   # Stage 2: SFT on Q&A pairs (uses qa_dataset.jsonl if present)
+├── trajectory_trainer.py      # Trajectory loss — geometric regularisation on hidden states
+├── train.py                   # Stage 2: SFT with trajectory loss (uses qa_dataset.jsonl if present)
 ├── self_evolve.py             # Stage 3: recursive self-evolution loop via LM Studio
 ├── colab_train.ipynb          # Colab notebook — train 8B on a free T4 GPU
 ├── serve.py                   # Gradio localhost chat UI
